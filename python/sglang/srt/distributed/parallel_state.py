@@ -1114,6 +1114,12 @@ def init_distributed_environment(
             assert timeout > 0, "timeout must be positive"
             timeout = timedelta(seconds=timeout)
 
+        # in 8xH20 and 4xNIC environment, ensure bond affinity, with only two GPUs bound to each bond
+        if True:
+            os.environ["NVSHMEM_ENABLE_NIC_PE_MAPPING"] = "1"
+            bond = f"mlx5_bond_{int(local_rank / 2)}"
+            os.environ["NVSHMEM_HCA_LIST"] = f"{bond}:1"
+
         # this backend is used for WORLD
         torch.distributed.init_process_group(
             backend=backend,

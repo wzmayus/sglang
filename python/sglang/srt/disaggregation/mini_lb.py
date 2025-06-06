@@ -9,6 +9,7 @@ import random
 import urllib
 from itertools import chain
 from typing import List, Optional
+from threading import RLock
 
 import aiohttp
 import orjson
@@ -49,6 +50,10 @@ class MiniLoadBalancer:
         self.prefill_configs = prefill_configs
         self.prefill_servers = [p.url for p in prefill_configs]
         self.decode_servers = decode_servers
+        self._current_prefill_index = 0
+        self._current_decode_index = 0
+        self._room_id = 0
+        self._lock = RLock()
 
     def add_prefill_server(self, new_prefill_config: PrefillConfig):
         self.prefill_configs.append(new_prefill_config)
@@ -62,8 +67,10 @@ class MiniLoadBalancer:
         assert len(self.prefill_configs) > 0, "No prefill servers available"
         assert len(self.decode_servers) > 0, "No decode servers available"
 
-        prefill_config = random.choice(self.prefill_configs)
-        decode_server = random.choice(self.decode_servers)
+        prefill_config = self.prefill_configs[self._current_prefill_index]
+        decode_server = self.decode_servers[self._current_decode_index]
+        self._current_prefill_index  = (self._current_prefill_index + 1) % len(self.prefill_servers)
+        self._current_decode_index  = (self._current_decode_index + 1) % len(self.decode_servers)
         return prefill_config.url, prefill_config.bootstrap_port, decode_server
 
     async def generate(
@@ -316,7 +323,11 @@ async def handle_completion_request(request_data: dict):
 
 
 def _generate_bootstrap_room():
-    return random.randint(0, 2**63 - 1)
+    global load_balancer
+    with load_balancer._lock:
+        rst = load_balancer._room_id
+        load_balancer._room_id += 1
+    return rst
 
 
 # We may utilize `GenerateReqInput`'s logic later
