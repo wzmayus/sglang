@@ -84,6 +84,8 @@ def topk_ids_logical_to_physical(
         return _topk_ids_logical_to_physical_static(topk_ids, info)
     if info.ep_dispatch_algorithm in ["dynamic", "fake"]:
         return _topk_ids_logical_to_physical_dynamic(topk_ids, info)
+    if info.ep_dispatch_algorithm == "fake_uniform":
+        return _topk_ids_logical_to_physical_fake_uniform(topk_ids, info)
     if info.ep_dispatch_algorithm == "fake_grouped_uniform":
         return _topk_ids_logical_to_physical_fake_grouped_uniform(topk_ids, info)
     raise NotImplementedError(f"Unknown algorithm {info.ep_dispatch_algorithm}")
@@ -110,6 +112,19 @@ def _topk_ids_logical_to_physical_dynamic(
 
     topk_ids = topk_ids.view(topk_ids_original_shape)
     return topk_ids
+
+def _topk_ids_logical_to_physical_fake_uniform(
+    topk_ids: torch.Tensor, info: Optional[ExpertLocationDispatchInfo]
+) -> torch.Tensor:
+    # NOTE it will have probability to send one token to one expert multiple times
+    return torch.randint(
+        0,
+        info.num_physical_experts,
+        topk_ids.shape,
+        dtype=topk_ids.dtype,
+        device=topk_ids.device,
+    )
+
 
 
 @torch.compile(dynamic=True, backend=get_compiler_backend())
