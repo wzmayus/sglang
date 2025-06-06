@@ -23,9 +23,8 @@ import logging
 import threading
 from collections import deque
 from http import HTTPStatus
-from typing import TYPE_CHECKING, List, Optional, Tuple
-import numpy as np
-import numpy.typing as npt
+from typing import TYPE_CHECKING, List, Optional
+
 import torch
 
 from sglang.srt.disaggregation.base import BaseKVManager, KVArgs, KVPoll
@@ -215,10 +214,6 @@ class SchedulerDisaggregationPrefillMixin:
     def event_loop_normal_disagg_prefill(self: Scheduler):
         """A normal scheduler loop for prefill worker in disaggregation mode."""
 
-        self.kv_manager: BaseKVManager
-        if self.kv_manager.is_support_asnyc:
-            model = self.tp_worker.worker.model_runner.model
-            self.kv_manager.insert_layer_callbacks(model)
         while True:
             recv_reqs = self.recv_requests()
             self.process_input_requests(recv_reqs)
@@ -238,8 +233,6 @@ class SchedulerDisaggregationPrefillMixin:
             self.cur_batch = batch
 
             if batch:
-                if self.kv_manager.is_support_asnyc:
-                    self.kv_manager.prepare_batch(self, batch)
                 result = self.run_batch(batch)
                 self.process_batch_result_disagg_prefill(batch, result)
 
@@ -258,10 +251,6 @@ class SchedulerDisaggregationPrefillMixin:
     @torch.no_grad()
     def event_loop_overlap_disagg_prefill(self: Scheduler):
         self.result_queue = deque()
-        self.kv_manager: BaseKVManager
-        if self.kv_manager.is_support_asnyc:
-            model = self.tp_worker.worker.model_runner.model
-            self.kv_manager.insert_layer_callbacks(model)
 
         while True:
             recv_reqs = self.recv_requests()
@@ -282,8 +271,6 @@ class SchedulerDisaggregationPrefillMixin:
             self.cur_batch = batch
 
             if batch:
-                if self.kv_manager.is_support_asnyc:
-                    self.kv_manager.prepare_batch(self, batch)
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -478,13 +465,13 @@ class SchedulerDisaggregationPrefillMixin:
                 # chunked request keeps its rid but will get a new req_pool_idx
                 self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
                 self.running_batch.batch_is_full = False
-    def get_kv_chunk_info(
+
+    def send_kv_chunk(
         self: Scheduler,
         req: Req,
         last_chunk: bool = False,
         end_idx: Optional[int] = None,
-        delay_send: Optional[bool] = True,
-    ) -> Tuple[Tuple[npt.NDArray[np.int64], slice], int]:
+    ) -> None:
         """
         Send a prefilled chunk to the decode server
         """
@@ -496,7 +483,7 @@ class SchedulerDisaggregationPrefillMixin:
             else min(len(req.fill_ids), len(req.origin_input_ids))
         )
 
-        if delay_send and (not last_chunk):
+        if not last_chunk:
             # if not the last chunk and the last page is partial, delay the last partial page to the next send
             end_idx = end_idx - end_idx % page_size
 
@@ -505,6 +492,7 @@ class SchedulerDisaggregationPrefillMixin:
             .cpu()
             .numpy()
         )
+        req.start_send_idx = end_idx
         if last_chunk:
             self.disagg_metadata_buffers.set_buf(req)
         page_indices = kv_to_page_indices(kv_indices, page_size)
@@ -512,20 +500,5 @@ class SchedulerDisaggregationPrefillMixin:
             logger.info(
                 f"Skip sending kv chunk for request {req.rid=} {req.bootstrap_room=} because page_indices is empty"
             )
-            return None, end_idx
-        page_start_idx = start_idx // page_size
-        page_end_idx = page_start_idx + len(page_indices)
-        return (page_indices, slice(page_start_idx, page_end_idx)), end_idx
-
-    def send_kv_chunk(
-        self: Scheduler,
-        req: Req,
-        last_chunk: bool = False,
-        end_idx: Optional[int] = None,
-    ) -> None:
-        infos, end_idx = self.get_kv_chunk_info(req, last_chunk, end_idx)
-        # Update next start_send_idx
-        req.start_send_idx = end_idx
-        if infos is not None:
-            (page_indices, _) = infos
-            req.disagg_kv_sender.send(page_indices)
+            return
+        req.disagg_kv_sender.send(page_indices)

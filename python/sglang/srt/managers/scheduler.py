@@ -476,7 +476,6 @@ class Scheduler(
         self.disaggregation_mode = DisaggregationMode(
             self.server_args.disaggregation_mode
         )
-        self.kv_manager = None
         self.init_disaggregation()
 
     def init_tokenizer(self):
@@ -623,7 +622,6 @@ class Scheduler(
 
             # Metric for pre-allocation
             self.num_tokens_pre_allocated = 0
-            self.kv_manager = self.disagg_decode_prealloc_queue.kv_manager
 
         elif self.disaggregation_mode == DisaggregationMode.PREFILL:
             # *2 for the headroom.
@@ -651,7 +649,6 @@ class Scheduler(
             )
             # The prefill requests that are in the middle of kv sending
             self.disagg_prefill_inflight_queue: List[Req] = []
-            self.kv_manager = self.disagg_prefill_bootstrap_queue.kv_manager
 
     @DynamicGradMode()
     def event_loop_normal(self):
@@ -1165,8 +1162,6 @@ class Scheduler(
             f += f"#unbootstrapped-req: {len(self.disagg_prefill_bootstrap_queue.queue)}, "
             f += f"#queue-req: {len(self.waiting_queue)}, "
             f += f"#transferring-req: {len(self.disagg_prefill_inflight_queue)}, "
-            f += f"gap-latency: {gap_latency}, "
-            f += f"gen throughput (token/s): {adder.log_input_tokens / gap_latency}, "
             f += f"time: {gap_latency:.2f} "
         else:
             f += f"#queue-req: {len(self.waiting_queue)}"
@@ -1235,7 +1230,6 @@ class Scheduler(
         msg += (
             f"cuda graph: {can_run_cuda_graph}, "
             f"gen throughput (token/s): {self.last_gen_throughput:.2f}, "
-            f"gap-latency: {gap_latency}, "
             f"#queue-req: {len(self.waiting_queue)}"
         )
 
