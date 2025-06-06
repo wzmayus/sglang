@@ -8,8 +8,8 @@ import logging
 import random
 import urllib
 from itertools import chain
-from typing import List, Optional
 from threading import RLock
+from typing import List, Optional
 
 import aiohttp
 import orjson
@@ -69,8 +69,12 @@ class MiniLoadBalancer:
 
         prefill_config = self.prefill_configs[self._current_prefill_index]
         decode_server = self.decode_servers[self._current_decode_index]
-        self._current_prefill_index  = (self._current_prefill_index + 1) % len(self.prefill_servers)
-        self._current_decode_index  = (self._current_decode_index + 1) % len(self.decode_servers)
+        self._current_prefill_index = (self._current_prefill_index + 1) % len(
+            self.prefill_servers
+        )
+        self._current_decode_index = (self._current_decode_index + 1) % len(
+            self.decode_servers
+        )
         return prefill_config.url, prefill_config.bootstrap_port, decode_server
 
     async def generate(
