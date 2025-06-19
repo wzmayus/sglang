@@ -20,7 +20,10 @@ from sglang.srt.layers.moe.ep_moe.kernels import (
     pre_reorder_triton_kernel,
     run_moe_ep_preproess,
     silu_and_mul_masked_post_quant_fwd,
+    silu_and_mul_masked_fwd,
     silu_and_mul_triton_kernel,
+    run_fbgemm_preprocess,
+    run_fbgemm_postprocess,
     tma_align_input_scale,
 )
 from sglang.srt.layers.moe.fused_moe_triton import FusedMoeWeightScaleSupported
@@ -50,6 +53,8 @@ from sglang.srt.utils import (
     is_hip,
     set_weight_attrs,
 )
+from sglang.srt.layers.moe.ep_moe.fbgemm_grouped_gemm import grouped_gemm as fb_grouped_gemm
+from sgl_kernel import silu_and_mul
 
 _is_hip = is_hip()
 _is_fp8_fnuz = is_fp8_fnuz()
@@ -918,6 +923,7 @@ class DeepEPMoE(EPMoE):
         activation: str = "silu",
         routed_scaling_factor: Optional[float] = None,
         deepep_mode: DeepEPMode = DeepEPMode.auto,
+        use_fb_grouped_gemm: bool = False,
     ):
         super().__init__(
             num_experts=num_experts,
@@ -956,6 +962,9 @@ class DeepEPMoE(EPMoE):
             self.w2_weight,
             self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
         )
+        self.use_fb_grouped_gemm = use_fb_grouped_gemm
+        self.w13_weight_flatten = self.w13_weight.view(-1, self.w13_weight.shape[-1])
+        self.w2_weight_flatten = self.w2_weight.view(-1, self.w2_weight.shape[-1])
 
     def forward(
         self,
@@ -978,6 +987,9 @@ class DeepEPMoE(EPMoE):
             else:
                 return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:
+            if hidden_states[0].dtype == torch.bfloat16:
+                assert self.use_fb_grouped_gemm
+                return self.forward_deepgemm_masked_bf16(hidden_states, masked_m, expected_m)
             return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
@@ -1290,7 +1302,43 @@ class DeepEPMoE(EPMoE):
         )
 
         return down_output
+    
+    def forward_deepgemm_masked_bf16(
+        self,
+        hidden_states: torch.Tensor,
+        masked_m: torch.Tensor,
+        expected_m: int,
+    ):
+        assert self.quant_method is not None
+        assert self.activation == "silu"
 
+        num_groups, m, k = hidden_states.size()
+        n = self.w13_weight.shape[1]
+
+        # GroupGemm-0
+        hidden_states = run_fbgemm_preprocess(hidden_states, masked_m, total_m)        
+        gate_output = fb_grouped_gemm(hidden_states, self.w13_weight_flatten, masked_m)
+
+        dispose_tensor(hidden_states)
+
+        # Silu and mul
+        down_input = torch.empty(
+            (
+                gate_output.shape[0],
+                gate_output.shape[1] // 2,
+            ),
+            device=gate_output.device,
+            dtype=torch.bfloat16,
+        )
+        silu_and_mul(gate_output, down_input)
+        del gate_output
+
+        # GroupGemm-1
+        down_output = fb_grouped_gemm(down_input, self.w2_weight_flatten, masked_m)
+        down_output = run_fbgemm_postprocess(down_output, masked_m, m, k)
+        assert down_output.shape == torch.Size([num_groups, m, k])
+
+        return down_output
 
 def get_moe_impl_class():
     if global_server_args_dict["enable_deepep_moe"]:
