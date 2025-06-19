@@ -403,12 +403,11 @@ def _silu_and_mul_kernel(
     input_ptr,
     stride_input_0,
     stride_input_1,
-    stride_input_2,
     output_ptr,
     stride_output_0,
     stride_output_1,
-    stride_output_2,
     masked_m_ptr,
+    offsets_ptr,
     size_n,
     BLOCK_N: tl.constexpr,
     NUM_STAGE: tl.constexpr,
@@ -420,26 +419,25 @@ def _silu_and_mul_kernel(
     block_num_per_expert = tl.num_programs(1)
 
     token_num_cur_expert = tl.load(masked_m_ptr + expert_id)
+    offsets_cur_expert = tl.load(offsets_ptr + expert_id)
 
     stride_input_0 = tl.cast(stride_input_0, dtype=tl.int64)
     stride_output_0 = tl.cast(stride_output_0, dtype=tl.int64)
-    stride_input_1 = tl.cast(stride_input_1, dtype=tl.int64)
-    stride_output_1 = tl.cast(stride_output_1, dtype=tl.int64)
 
     offs_in_d = hidden_dim_block_index * BLOCK_N + tl.arange(0, BLOCK_N)
-    input_ptr_offs = input_ptr + expert_id * stride_input_0 + offs_in_d
-    output_ptr_offs = output_ptr + expert_id * stride_output_0 + offs_in_d
+    input_ptr_offs = input_ptr + offsets_cur_expert * stride_input_0 + offs_in_d
+    output_ptr_offs = output_ptr + offsets_cur_expert * stride_output_0 + offs_in_d
 
     for token_index in tl.range(
         token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE
     ):
         gate = tl.load(
-            input_ptr_offs + token_index * stride_input_1,
+            input_ptr_offs + token_index * stride_input_0,
             mask=offs_in_d < size_n,
             other=0.0,
         ).to(tl.float32)
         up = tl.load(
-            input_ptr_offs + token_index * stride_input_1 + size_n,
+            input_ptr_offs + token_index * stride_input_0 + size_n,
             mask=offs_in_d < size_n,
             other=0.0,
         )
@@ -447,7 +445,7 @@ def _silu_and_mul_kernel(
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
         tl.store(
-            output_ptr_offs + token_index * stride_output_1,
+            output_ptr_offs + token_index * stride_output_0,
             gate_up,
             mask=offs_in_d < size_n,
         )
@@ -466,11 +464,10 @@ def silu_and_mul_masked_fwd(
     assert input.is_contiguous()
     assert output.dtype == torch.bfloat16
     assert output.is_contiguous()
-    assert len(input.shape) == 3
-    assert input.shape[0] == masked_m.shape[0]
-    assert input.shape[-1] % 2 == 0
+    assert len(input.shape) == 2
+    assert input.shape[1] % 2 == 0
 
-    size_n = input.shape[-1] // 2
+    size_n = input.shape[1] // 2
 
     expert_num = len(masked_m)
 
@@ -490,12 +487,16 @@ def silu_and_mul_masked_fwd(
         expert_num,
     )
 
+    offsets = torch.zeros_like(masked_m)
+    offsets[1:] = torch.cumsum(masked_m[:-1], dim=0)
+
     _silu_and_mul_kernel[grid](
         input,
         *input.stride(),
         output,
         *output.stride(),
         masked_m,
+        offsets,
         size_n,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
@@ -1220,20 +1221,18 @@ def fbgemm_preprocess_kernel(
             val = tl.load(row_in + cols * lhs_stride_col, mask=mask)
             tl.store(row_out + cols * output_stride_col, val, mask=mask)
 
-def run_fbgemm_preprocess(lhs: torch.Tensor, m_sizes: torch.Tensor, total_m: torch.Tensor):
+def run_fbgemm_preprocess(lhs: torch.Tensor, m_sizes: torch.Tensor, output: torch.Tensor):
     """
     Args:
         lhs: [num_groups, m_max, k], float32
         m_sizes: [num_groups], int32
-        toatl_m: [1], sum of m_sizes,
 
     Returns:
         output: [total_m, k], same dtype as lhs
     """
     num_groups, m_max, k = lhs.shape
     assert m_sizes.shape[0] == num_groups
-    output = torch.zeros((num_groups * m_max, k), dtype=torch.bfloat16, device=m_sizes.device)
-
+    output = output.view(num_groups * m_max, k)
     offsets = torch.zeros_like(m_sizes, device=lhs.device)
     offsets[1:] = torch.cumsum(m_sizes[:-1], dim=0)
 
@@ -1280,7 +1279,7 @@ def fbgemm_postprocess_kernel(
             tl.store(row_out + cols * output_stride_col, val, mask=mask)
 
 
-def run_fbgemm_postprocess(lhs, m_sizes, m_max, k):
+def run_fbgemm_postprocess(lhs, m_sizes, m_max, output):
     """
     Args:
         output: [total_m, k]
@@ -1291,7 +1290,8 @@ def run_fbgemm_postprocess(lhs, m_sizes, m_max, k):
         output: [num_groups, m_max, k]
     """
     num_groups = m_sizes.shape[0]
-    output = torch.zeros((num_groups, m_max, k), dtype=torch.bfloat16, device=m_sizes.device)
+    k = output.shape[1]
+    output = output.view(num_groups, m_max, k)
 
     # Precompute offsets
     offsets = torch.zeros_like(m_sizes)
