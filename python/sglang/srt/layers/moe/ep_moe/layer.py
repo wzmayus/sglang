@@ -965,6 +965,7 @@ class DeepEPMoE(EPMoE):
         self.use_fb_grouped_gemm = use_fb_grouped_gemm
         self.w13_weight_flatten = self.w13_weight.view(-1, self.w13_weight.shape[-1])
         self.w2_weight_flatten = self.w2_weight.view(-1, self.w2_weight.shape[-1])
+        self.intermidiate_cache_1 = torch.empty((16384, hidden_size), dtype=torch.bfloat16, device=self.w13_weight.device)
 
     def forward(
         self,
@@ -1316,7 +1317,7 @@ class DeepEPMoE(EPMoE):
         n = self.w13_weight.shape[1]
 
         # GroupGemm-0
-        hidden_states = run_fbgemm_preprocess(hidden_states, masked_m, total_m)        
+        hidden_states = run_fbgemm_preprocess(hidden_states, masked_m, self.intermidiate_cache_1)        
         gate_output = fb_grouped_gemm(hidden_states, self.w13_weight_flatten, masked_m)
 
         dispose_tensor(hidden_states)
@@ -1330,12 +1331,12 @@ class DeepEPMoE(EPMoE):
             device=gate_output.device,
             dtype=torch.bfloat16,
         )
-        silu_and_mul(gate_output, down_input)
+        silu_and_mul_masked_fwd(gate_output, down_input, masked_m)
         del gate_output
 
         # GroupGemm-1
         down_output = fb_grouped_gemm(down_input, self.w2_weight_flatten, masked_m)
-        down_output = run_fbgemm_postprocess(down_output, masked_m, m, k)
+        down_output = run_fbgemm_postprocess(down_output, masked_m, m, self.intermidiate_cache_1)
         assert down_output.shape == torch.Size([num_groups, m, k])
 
         return down_output
