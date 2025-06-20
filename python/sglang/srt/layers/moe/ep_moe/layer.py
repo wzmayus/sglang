@@ -948,7 +948,8 @@ class DeepEPMoE(EPMoE):
         self.use_fb_grouped_gemm = use_fb_grouped_gemm
         self.w13_weight_flatten = self.w13_weight.view(-1, self.w13_weight.shape[-1])
         self.w2_weight_flatten = self.w2_weight.view(-1, self.w2_weight.shape[-1])
-        self.intermidiate_cache_1 = torch.empty((16384, hidden_size), dtype=torch.bfloat16, device=self.w13_weight.device)
+        # TODO: num_max_dispatch_tokens_per_rank = 128, make it configurable
+        self.intermidiate_cache_1 = torch.empty((128 * num_experts, hidden_size), dtype=torch.bfloat16, device=self.w13_weight.device)
 
     def forward(
         self,
