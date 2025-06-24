@@ -965,8 +965,6 @@ class DeepEPMoE(EPMoE):
         self.use_fb_grouped_gemm = use_fb_grouped_gemm
         self.w13_weight_flatten = self.w13_weight.view(-1, self.w13_weight.shape[-1])
         self.w2_weight_flatten = self.w2_weight.view(-1, self.w2_weight.shape[-1])
-        # TODO: num_max_dispatch_tokens_per_rank = 128, make it configurable
-        self.intermidiate_cache_1 = torch.empty((128 * num_experts, hidden_size), dtype=torch.bfloat16, device=self.w13_weight.device)
 
     def forward(
         self,
@@ -991,7 +989,7 @@ class DeepEPMoE(EPMoE):
         elif resolved_deepep_mode == DeepEPMode.low_latency:
             if hidden_states[0].dtype == torch.bfloat16:
                 assert self.use_fb_grouped_gemm
-                return self.forward_deepgemm_masked_bf16(hidden_states, masked_m, expected_m)
+                return self.forward_fb_grouped_gemm_bf16(hidden_states, masked_m, expected_m)
             return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
         else:
             raise ValueError(f"Invalid deepep_mode: {self.deepep_mode}")
@@ -1305,7 +1303,7 @@ class DeepEPMoE(EPMoE):
 
         return down_output
     
-    def forward_deepgemm_masked_bf16(
+    def forward_fb_grouped_gemm_bf16(
         self,
         hidden_states: torch.Tensor,
         masked_m: torch.Tensor,
@@ -1318,10 +1316,9 @@ class DeepEPMoE(EPMoE):
         n = self.w13_weight.shape[1]
 
         # GroupGemm-0
-        hidden_states = run_fbgemm_preprocess(hidden_states, masked_m, self.intermidiate_cache_1)        
+        output_cache = torch.empty((num_groups * m, k), dtype=hidden_states.dtype, device=hidden_states.device)
+        hidden_states, group_id = run_fbgemm_preprocess(hidden_states, masked_m, output_cache)
         gate_output = fb_grouped_gemm(hidden_states, self.w13_weight_flatten, masked_m)
-
-        dispose_tensor(hidden_states)
 
         # Silu and mul
         down_input = torch.empty(
@@ -1337,7 +1334,7 @@ class DeepEPMoE(EPMoE):
 
         # GroupGemm-1
         down_output = fb_grouped_gemm(down_input, self.w2_weight_flatten, masked_m)
-        down_output = run_fbgemm_postprocess(down_output, masked_m, m, self.intermidiate_cache_1)
+        down_output = run_fbgemm_postprocess(down_output, masked_m, m, output_cache, group_id)
         assert down_output.shape == torch.Size([num_groups, m, k])
 
         return down_output
