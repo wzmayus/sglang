@@ -409,7 +409,6 @@ async def async_request_sglang_generate(
                                 if ttft == 0.0:
                                     ttft = time.perf_counter() - st
                                     output.ttft = ttft
-                                    print(ttft)
 
                                 # Decoding phase
                                 else:
