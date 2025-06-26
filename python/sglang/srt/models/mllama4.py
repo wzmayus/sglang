@@ -17,6 +17,7 @@ from sglang.srt.managers.schedule_batch import MultimodalDataItem, MultimodalInp
 from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
+from sglang.srt.managers.expert_location import ModelConfigForExpertLocation
 
 
 class Llama4ForConditionalGeneration(nn.Module):
@@ -222,6 +223,14 @@ class Llama4ForConditionalGeneration(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
+
+    @classmethod
+    def get_model_config_for_expert_location(cls, config):
+        return ModelConfigForExpertLocation(
+            num_layers=config.num_hidden_layers,
+            num_logical_experts=config.num_local_experts,
+            num_groups=None,
+        )
 
 
 EntryClass = Llama4ForConditionalGeneration

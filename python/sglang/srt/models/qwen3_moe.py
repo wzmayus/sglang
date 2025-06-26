@@ -115,7 +115,6 @@ class Qwen3MoeSparseMoeBlock(nn.Module):
             **(
                 dict(
                     deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
-                    use_fb_grouped_gemm=True,
                 )
                 if global_server_args_dict["enable_deepep_moe"]
                 else {}

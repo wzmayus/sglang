@@ -908,7 +908,6 @@ class DeepEPMoE(EPMoE):
         activation: str = "silu",
         routed_scaling_factor: Optional[float] = None,
         deepep_mode: DeepEPMode = DeepEPMode.auto,
-        use_fb_grouped_gemm: bool = False,
     ):
         super().__init__(
             num_experts=num_experts,
@@ -945,7 +944,6 @@ class DeepEPMoE(EPMoE):
             self.w2_weight,
             self.w2_weight_scale_inv if self.use_block_quant else self.w2_weight_scale,
         )
-        self.use_fb_grouped_gemm = use_fb_grouped_gemm
         self.w13_weight_flatten = self.w13_weight.view(-1, self.w13_weight.shape[-1])
         self.w2_weight_flatten = self.w2_weight.view(-1, self.w2_weight.shape[-1])
 
@@ -971,7 +969,6 @@ class DeepEPMoE(EPMoE):
                 return self.forward_normal(hidden_states, reorder_topk_ids, seg_indptr)
         elif resolved_deepep_mode == DeepEPMode.low_latency:
             if hidden_states[0].dtype == torch.bfloat16:
-                assert self.use_fb_grouped_gemm
                 return self.forward_fb_grouped_gemm_bf16(hidden_states, masked_m, expected_m)
             return self.forward_deepgemm_masked(hidden_states, masked_m, expected_m)
         else:

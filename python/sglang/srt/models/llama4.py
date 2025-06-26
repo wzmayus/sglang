@@ -61,6 +61,8 @@ from sglang.srt.utils import (
 )
 
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
+from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
+
 
 _is_cuda = is_cuda()
 
@@ -88,6 +90,7 @@ class Llama4MoE(nn.Module):
 
     def __init__(
         self,
+        layer_id: int,
         config: Llama4TextConfig,
         quant_config: Optional[QuantizationConfig] = None,
         prefix: str = "",
@@ -106,17 +109,23 @@ class Llama4MoE(nn.Module):
             prefix=add_prefix("router", prefix),
         )
 
-        self.experts = FusedMoE(
-            num_experts=config.num_local_experts,
+        moe_config = dict()
+        if global_server_args_dict["enable_deepep_moe"]:
+            moe_config["deepep_mode"] = DeepEPMode[global_server_args_dict["deepep_mode"]]
+        elif not global_server_args_dict["enable_ep_moe"]:
+            moe_config["apply_router_weight_on_input"] = True
+        
+        self.experts = get_moe_impl_class()(
+            num_experts=config.num_local_experts
+            + global_server_args_dict["ep_num_redundant_experts"],
             top_k=config.num_experts_per_tok,
+            layer_id=layer_id,
             hidden_size=config.hidden_size,
-            custom_routing_function=Llama4MoE.custom_routing_function,
             intermediate_size=intermediate_size_moe,
-            reduce_results=False,
             renormalize=False,
             quant_config=quant_config,
-            apply_router_weight_on_input=True,
             prefix=add_prefix("experts", prefix),
+            **moe_config,
         )
 
         self.shared_expert = LlamaMLP(
@@ -373,6 +382,7 @@ class Llama4DecoderLayer(nn.Module):
         is_moe_layer = self._is_moe_layer(layer_id)
         if is_moe_layer:
             self.feed_forward = Llama4MoE(
+                layer_id=layer_id,
                 config=config,
                 quant_config=quant_config,
                 prefix=add_prefix("feed_forward", prefix),
