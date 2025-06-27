@@ -19,6 +19,7 @@ from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
 from sglang.srt.managers.expert_location import ModelConfigForExpertLocation
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
+from sglang.srt.models.llama4 import Llama4MoE
 
 class Llama4ForConditionalGeneration(nn.Module):
     packed_modules_mapping = {
@@ -223,7 +224,14 @@ class Llama4ForConditionalGeneration(nn.Module):
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-
+        
+        layers = self.language_model.model.layers
+        self.routed_experts_weights_of_layer = {
+            layer_id: layers[layer_id].feed_forward.get_moe_weights()
+            for layer_id in range(len(layers))
+            if isinstance(layers[layer_id].feed_forward, Llama4MoE)
+        }
+        
     @classmethod
     def get_model_config_for_expert_location(cls, config):
         return ModelConfigForExpertLocation(

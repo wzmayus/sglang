@@ -67,7 +67,13 @@ from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.topk import select_experts
-from sglang.srt.managers.expert_location_dispatch import ExpertLocationDispatchInfo
+from sglang.srt.managers.expert_location_dispatch import (
+    ExpertLocationDispatchInfo,
+    topk_ids_logical_to_physical,
+)
+from sglang.srt.managers.expert_distribution import (
+    get_global_expert_distribution_recorder,
+)
 from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher
 from sglang.srt.layers.moe.topk import _mask_topk_ids_padded_region
 
@@ -85,12 +91,17 @@ class Llama4MoE(nn.Module):
         gating_output: torch.Tensor,
         topk: int,
         renormalize: bool,
+        num_token_non_padded: Optional[torch.Tensor] = None,
+        expert_location_dispatch_info: Optional[ExpertLocationDispatchInfo] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         router_scores_aK, router_indices_aK = fast_topk(gating_output, topk, dim=-1)
         router_scores_aK = torch.sigmoid(router_scores_aK.float()).to(torch.float32)
+        router_indices_aK = router_indices_aK.to(torch.int32)
+        router_indices_aK = topk_ids_logical_to_physical(router_indices_aK, expert_location_dispatch_info)
+        _mask_topk_ids_padded_region(router_indices_aK, num_token_non_padded)
         return (
             router_scores_aK.view(-1).reshape(router_scores_aK.shape),
-            router_indices_aK.to(torch.int32),
+            router_indices_aK,
         )
 
     def __init__(
@@ -176,6 +187,13 @@ class Llama4MoE(nn.Module):
         else:
             return self.forward_deepep(hidden_states, forward_batch)
     
+    def get_moe_weights(self):
+        return [
+            x.data
+            for name, x in self.experts.named_parameters()
+            if name not in ["correction_bias"]
+        ]
+
     def forward_deepep(self, hidden_states, forward_batch: ForwardBatch):
         forward_mode = forward_batch.forward_mode
         shared_out = None
@@ -606,12 +624,13 @@ class Llama4Model(nn.Module):
             if i in self.layers_to_capture:
                 aux_hidden_states.append(hidden_states + residual)
             layer = self.layers[i]
-            hidden_states, residual = layer(
-                positions,
-                hidden_states,
-                forward_batch,
-                residual,
-            )
+            with get_global_expert_distribution_recorder().with_current_layer(i):
+                hidden_states, residual = layer(
+                    positions,
+                    hidden_states,
+                    forward_batch,
+                    residual,
+                )
         if not forward_batch.forward_mode.is_idle():
             hidden_states, _ = self.norm(hidden_states, residual)
 
