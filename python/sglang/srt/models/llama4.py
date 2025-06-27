@@ -25,6 +25,7 @@ from transformers import Llama4TextConfig
 
 from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
+    parallel_state,
     tensor_model_parallel_all_reduce,
 )
 from sglang.srt.layers.dp_attention import (
@@ -58,11 +59,17 @@ from sglang.srt.utils import (
     get_compiler_backend,
     is_cuda,
     make_layers,
+    DeepEPMode,
+    is_non_idle_and_non_empty,
 )
 
 from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
-
+from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
+from sglang.srt.layers.moe.topk import select_experts
+from sglang.srt.managers.expert_location_dispatch import ExpertLocationDispatchInfo
+from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher
+from sglang.srt.layers.moe.topk import _mask_topk_ids_padded_region
 
 _is_cuda = is_cuda()
 
@@ -80,9 +87,7 @@ class Llama4MoE(nn.Module):
         renormalize: bool,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         router_scores_aK, router_indices_aK = fast_topk(gating_output, topk, dim=-1)
-        router_scores_aK = torch.sigmoid(router_scores_aK.float()).to(
-            hidden_states.dtype
-        )
+        router_scores_aK = torch.sigmoid(router_scores_aK.float()).to(torch.float32)
         return (
             router_scores_aK.view(-1).reshape(router_scores_aK.shape),
             router_indices_aK.to(torch.int32),
@@ -99,6 +104,7 @@ class Llama4MoE(nn.Module):
         self.tp_size = get_tensor_model_parallel_world_size()
         self.top_k = config.num_experts_per_tok
         self.device_module = torch.get_device_module()
+        self.layer_id = layer_id
 
         intermediate_size_moe = config.intermediate_size
         self.router = ReplicatedLinear(
@@ -122,6 +128,7 @@ class Llama4MoE(nn.Module):
             layer_id=layer_id,
             hidden_size=config.hidden_size,
             intermediate_size=intermediate_size_moe,
+            custom_routing_function=Llama4MoE.custom_routing_function,
             renormalize=False,
             quant_config=quant_config,
             prefix=add_prefix("experts", prefix),
@@ -135,9 +142,107 @@ class Llama4MoE(nn.Module):
             quant_config=quant_config,
             prefix=add_prefix("shared_expert", prefix),
             reduce_results=False,  # We need to do scatter before reduce
+            **(
+                dict(tp_rank=0, tp_size=1)
+                if global_server_args_dict["enable_deepep_moe"]
+                else {}
+            ),
         )
 
+        if global_server_args_dict["enable_deepep_moe"]:
+            # TODO: we will support tp < ep in the future
+            self.ep_size = get_tensor_model_parallel_world_size()
+            self.num_experts = (
+                config.num_local_experts + global_server_args_dict["ep_num_redundant_experts"]
+            )
+            self.top_k = config.num_experts_per_tok
+
+            self.deepep_dispatcher = MaybeTboDeepEPDispatcher(
+                group=parallel_state.get_tp_group().device_group,
+                router_topk=self.top_k,
+                permute_fusion=True,
+                num_experts=self.num_experts,
+                num_local_experts=config.num_local_experts // self.tp_size,
+                hidden_size=config.hidden_size,
+                params_dtype=config.torch_dtype,
+                deepep_mode=DeepEPMode[global_server_args_dict["deepep_mode"]],
+                async_finish=True,  # TODO
+                return_recv_hook=True,
+            )
+
     def forward(self, hidden_states, forward_batch: ForwardBatch):
+        if not global_server_args_dict["enable_deepep_moe"]:
+            return self.forward_normal(hidden_states, forward_batch)
+        else:
+            return self.forward_deepep(hidden_states, forward_batch)
+    
+    def forward_deepep(self, hidden_states, forward_batch: ForwardBatch):
+        forward_mode = forward_batch.forward_mode
+        shared_out = None
+        if is_non_idle_and_non_empty(forward_mode, hidden_states):
+            # router_logits: (num_tokens, n_experts)
+            router_logits, _ = self.router(hidden_states)
+            shared_out = self.shared_expert(hidden_states)
+            topk_weights, topk_idx = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=False,
+                renormalize=False,
+                custom_routing_function=Llama4MoE.custom_routing_function,
+                num_token_non_padded=forward_batch.num_token_non_padded,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
+            )
+        else:
+            topk_idx = torch.full(
+                (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
+            )
+            topk_weights = torch.empty(
+                (0, self.top_k), dtype=torch.float32, device=hidden_states.device
+            )
+        if self.ep_size > 1:
+            (
+                hidden_states,
+                topk_idx,
+                topk_weights,
+                reorder_topk_ids,
+                num_recv_tokens_per_expert,
+                seg_indptr,
+                masked_m,
+                expected_m,
+            ) = self.deepep_dispatcher.dispatch(
+                hidden_states=hidden_states,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                forward_mode=forward_mode,
+            )
+        final_hidden_states = self.experts(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            reorder_topk_ids=reorder_topk_ids,
+            seg_indptr=seg_indptr,
+            masked_m=masked_m,
+            expected_m=expected_m,
+            num_recv_tokens_per_expert=num_recv_tokens_per_expert,
+            forward_mode=forward_mode,
+        )
+        if self.ep_size > 1:
+            final_hidden_states = self.deepep_dispatcher.combine(
+                hidden_states=final_hidden_states,
+                topk_idx=topk_idx,
+                topk_weights=topk_weights,
+                forward_mode=forward_mode,
+            )
+
+        if shared_out is not None:
+            final_hidden_states = final_hidden_states + shared_out
+
+        return final_hidden_states
+
+    def forward_normal(self, hidden_states, forward_batch: ForwardBatch):
         shared_out, routed_out = self._forward_core(
             hidden_states, forward_batch.forward_mode
         )

@@ -18,7 +18,7 @@ from sglang.srt.model_executor.forward_batch_info import ForwardBatch
 from sglang.srt.model_loader.weight_utils import default_weight_loader
 from sglang.srt.utils import add_prefix
 from sglang.srt.managers.expert_location import ModelConfigForExpertLocation
-
+from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 
 class Llama4ForConditionalGeneration(nn.Module):
     packed_modules_mapping = {
@@ -140,7 +140,7 @@ class Llama4ForConditionalGeneration(nn.Module):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = FusedMoE.make_expert_params_mapping(
+        expert_params_mapping = get_moe_impl_class().make_expert_params_mapping(
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
             ckpt_up_proj_name="up_proj",
