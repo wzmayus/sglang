@@ -118,7 +118,7 @@ class Llama4MoE(nn.Module):
         moe_config = dict()
         if global_server_args_dict["enable_deepep_moe"]:
             moe_config["deepep_mode"] = DeepEPMode[global_server_args_dict["deepep_mode"]]
-        elif not global_server_args_dict["enable_ep_moe"]:
+        else:
             moe_config["apply_router_weight_on_input"] = True
         
         self.experts = get_moe_impl_class()(
@@ -195,6 +195,11 @@ class Llama4MoE(nn.Module):
                     layer_id=self.layer_id,
                 ),
             )
+            # (yizhang2077) it is a hacky way for llama4, llama4 multiplies topk-weight after the 1st groupedgemm in MoE, 
+            # while other MoE use to topk-weight after the 2nd groupedgemm in MoE. One of simple way is to change
+            # hidden_states and topk_weights here, it can work since topk is 1 in llama4 models
+            hidden_states = (hidden_states * topk_weights).to(hidden_states.dtype)
+            topk_weights = torch.ones_like(topk_weights)
         else:
             topk_idx = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
