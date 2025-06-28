@@ -328,19 +328,19 @@ class Llama4MoE(nn.Module):
             state.router_logits = None
 
     def op_shared_experts(self, state):
-        hidden_states_mlp_input = state.pop("hidden_states_mlp_input")
+        shared_expert_input = state.pop("shared_expert_input")
         if is_non_idle_and_non_empty(
-            state.forward_batch.forward_mode, hidden_states_mlp_input
+            state.forward_batch.forward_mode, shared_expert_input
         ):
-            state.shared_output = self.shared_experts(hidden_states_mlp_input)
+            state.shared_output = self.shared_expert(shared_expert_input)
         else:
             state.shared_output = None
     
     def op_select_experts(self, state):
         router_logits = state.pop("router_logits")
-        hidden_states = state.hidden_states_mlp_input
+        hidden_states = state.shared_expert_input = state.hidden_states_mlp_input
         if router_logits is not None:
-            state.topk_weights_local, state.topk_idx_local = select_experts(
+            topk_weights_local, state.topk_idx_local = select_experts(
                 hidden_states=hidden_states,
                 router_logits=router_logits,
                 top_k=self.top_k,
@@ -355,8 +355,9 @@ class Llama4MoE(nn.Module):
             # (yizhang2077) it is a hacky way for llama4, llama4 multiplies topk-weight after the 1st groupedgemm in MoE, 
             # while other MoE use to topk-weight after the 2nd groupedgemm in MoE. One of simple way is to change
             # hidden_states and topk_weights here, it can work since topk is 1 in llama4 models
-            state.update({"hidden_states_mlp_input": (hidden_states * state.topk_weights_local).to(hidden_states.dtype)})
-            state.update({"topk_weights_local": torch.ones_like(state.topk_weights_local)})
+            state.pop("hidden_states_mlp_input")
+            state.hidden_states_mlp_input = (hidden_states * topk_weights_local).to(hidden_states.dtype)
+            state.topk_weights_local = torch.ones_like(topk_weights_local)
         else:
             state.topk_idx_local = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
@@ -369,7 +370,7 @@ class Llama4MoE(nn.Module):
         if self.ep_size > 1:
             # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
             self.deepep_dispatcher.dispatch_a(
-                hidden_states=state.hidden_states_mlp_input,
+                hidden_states=state.pop("hidden_states_mlp_input"),
                 topk_idx=state.pop("topk_idx_local"),
                 topk_weights=state.pop("topk_weights_local"),
                 forward_mode=state.forward_batch.forward_mode,
@@ -427,9 +428,7 @@ class Llama4MoE(nn.Module):
         final_hidden_states = state.pop("hidden_states_after_combine")
 
         if (shared_output := state.pop("shared_output")) is not None:
-            x = shared_output
-            x.add_(final_hidden_states)
-            final_hidden_states = x
+            final_hidden_states = final_hidden_states + shared_output
 
         state.hidden_states_mlp_output = final_hidden_states
 
