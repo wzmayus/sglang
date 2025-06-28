@@ -355,8 +355,8 @@ class Llama4MoE(nn.Module):
             # (yizhang2077) it is a hacky way for llama4, llama4 multiplies topk-weight after the 1st groupedgemm in MoE, 
             # while other MoE use to topk-weight after the 2nd groupedgemm in MoE. One of simple way is to change
             # hidden_states and topk_weights here, it can work since topk is 1 in llama4 models
-            state.hidden_states_mlp_input = (hidden_states * state.topk_weights_local).to(hidden_states.dtype)
-            state.topk_weights_local = torch.ones_like(state.topk_weights_local)
+            state.update({"hidden_states_mlp_input": (hidden_states * state.topk_weights_local).to(hidden_states.dtype)})
+            state.update({"topk_weights_local": torch.ones_like(state.topk_weights_local)})
         else:
             state.topk_idx_local = torch.full(
                 (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
