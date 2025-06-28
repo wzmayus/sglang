@@ -63,7 +63,11 @@ from sglang.srt.utils import (
     is_non_idle_and_non_empty,
 )
 
-from sglang.srt.layers.communicator import LayerCommunicator, LayerScatterModes
+from sglang.srt.layers.communicator import (
+    LayerCommunicator,
+    LayerScatterModes,
+    ScatterMode,
+)
 from sglang.srt.layers.moe.ep_moe.layer import get_moe_impl_class
 from sglang.srt.layers.moe.ep_moe.token_dispatcher import DeepEPDispatcher
 from sglang.srt.layers.moe.topk import select_experts
@@ -74,7 +78,10 @@ from sglang.srt.managers.expert_location_dispatch import (
 from sglang.srt.managers.expert_distribution import (
     get_global_expert_distribution_recorder,
 )
-from sglang.srt.two_batch_overlap import MaybeTboDeepEPDispatcher
+from sglang.srt.two_batch_overlap import (
+    MaybeTboDeepEPDispatcher,
+    model_forward_maybe_tbo,
+)
 from sglang.srt.layers.moe.topk import _mask_topk_ids_padded_region
 
 _is_cuda = is_cuda()
@@ -362,7 +369,7 @@ class Llama4MoE(nn.Module):
         if self.ep_size > 1:
             # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
             self.deepep_dispatcher.dispatch_a(
-                hidden_states=state.pop("hidden_states_mlp_input"),
+                hidden_states=state.hidden_states_mlp_input,
                 topk_idx=state.pop("topk_idx_local"),
                 topk_weights=state.pop("topk_weights_local"),
                 forward_mode=state.forward_batch.forward_mode,
@@ -571,6 +578,9 @@ class Llama4Attention(nn.Module):
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
     ):
+        if hidden_states.shape[0] == 0:
+            return hidden_states, forward_batch, None
+
         qkv, _ = self.qkv_proj(hidden_states)
 
         qk, v = qkv.split([self.q_size + self.kv_size, self.kv_size], dim=-1)
@@ -652,8 +662,8 @@ class Llama4DecoderLayer(nn.Module):
             prefix=add_prefix("self_attn", prefix),
         )
         self.config = config
-        is_moe_layer = self._is_moe_layer(layer_id)
-        if is_moe_layer:
+        self.is_moe_layer = self._is_moe_layer(layer_id)
+        if self.is_moe_layer:
             self.feed_forward = Llama4MoE(
                 layer_id=layer_id,
                 config=config,
@@ -678,7 +688,7 @@ class Llama4DecoderLayer(nn.Module):
         self.layer_scatter_modes = LayerScatterModes.init_new(
             layer_id=layer_id,
             num_layers=config.num_hidden_layers,
-            is_layer_sparse=is_moe_layer,
+            is_layer_sparse=self.is_moe_layer,
             is_previous_layer_sparse=is_previous_moe_layer,
         )
 
@@ -823,19 +833,34 @@ class Llama4Model(nn.Module):
             hidden_states = input_embeds
         residual = None
         aux_hidden_states = []
-        for i in range(len(self.layers)):
-            if i in self.layers_to_capture:
-                aux_hidden_states.append(hidden_states + residual)
-            layer = self.layers[i]
-            with get_global_expert_distribution_recorder().with_current_layer(i):
-                hidden_states, residual = layer(
-                    positions,
-                    hidden_states,
-                    forward_batch,
-                    residual,
-                )
+
+        if forward_batch.can_run_tbo:
+            hidden_states, residual = model_forward_maybe_tbo(
+                layers=self.layers,
+                enable_tbo=True,
+                input_data_scatter_mode=ScatterMode.model_input_output(),
+                positions=positions,
+                forward_batch=forward_batch,
+                hidden_states=hidden_states,
+                residual=residual,
+            )
+        else:
+            for i in range(len(self.layers)):
+                if i in self.layers_to_capture:
+                    aux_hidden_states.append(hidden_states + residual)
+                layer = self.layers[i]
+                with get_global_expert_distribution_recorder().with_current_layer(i):
+                    hidden_states, residual = layer(
+                        positions,
+                        hidden_states,
+                        forward_batch,
+                        residual,
+                    )
         if not forward_batch.forward_mode.is_idle():
-            hidden_states, _ = self.norm(hidden_states, residual)
+            if residual is None:
+                hidden_states, _ = self.norm(hidden_states)
+            else:
+                hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) == 0:
             return hidden_states
