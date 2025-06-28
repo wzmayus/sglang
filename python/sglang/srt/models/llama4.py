@@ -311,6 +311,120 @@ class Llama4MoE(nn.Module):
 
         return shared_out, routed_out
 
+    def op_gate(self, state):
+        if is_non_idle_and_non_empty(
+            state.forward_batch.forward_mode, state.hidden_states_mlp_input
+        ):
+            # router_logits: (num_tokens, n_experts)
+            state.router_logits, _ = self.router(state.hidden_states_mlp_input)
+        else:
+            state.router_logits = None
+
+    def op_shared_experts(self, state):
+        hidden_states_mlp_input = state.pop("hidden_states_mlp_input")
+        if (self.num_fused_shared_experts == 0) and is_non_idle_and_non_empty(
+            state.forward_batch.forward_mode, hidden_states_mlp_input
+        ):
+            state.shared_output = self.shared_experts(hidden_states_mlp_input)
+        else:
+            state.shared_output = None
+    
+    def op_select_experts(self, state):
+        router_logits = state.pop("router_logits")
+        hidden_states = state.hidden_states_mlp_input
+        if router_logits is not None:
+            state.topk_weights_local, state.topk_idx_local = select_experts(
+                hidden_states=hidden_states,
+                router_logits=router_logits,
+                top_k=self.top_k,
+                use_grouped_topk=False,
+                renormalize=False,
+                custom_routing_function=Llama4MoE.custom_routing_function,
+                num_token_non_padded=state.forward_batch.num_token_non_padded,
+                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                    layer_id=self.layer_id,
+                ),
+            )
+            # (yizhang2077) it is a hacky way for llama4, llama4 multiplies topk-weight after the 1st groupedgemm in MoE, 
+            # while other MoE use to topk-weight after the 2nd groupedgemm in MoE. One of simple way is to change
+            # hidden_states and topk_weights here, it can work since topk is 1 in llama4 models
+            state.hidden_states_mlp_input = (hidden_states * state.topk_weights_local).to(hidden_states.dtype)
+            state.topk_weights_local = torch.ones_like(state.topk_weights_local)
+        else:
+            state.topk_idx_local = torch.full(
+                (0, self.top_k), -1, dtype=torch.int, device=hidden_states.device
+            )
+            state.topk_weights_local = torch.empty(
+                (0, self.top_k), dtype=torch.float32, device=hidden_states.device
+            )
+
+    def op_dispatch_a(self, state):
+        if self.ep_size > 1:
+            # TODO(ch-wan): allow users to set num_max_dispatch_tokens_per_rank value
+            self.deepep_dispatcher.dispatch_a(
+                hidden_states=state.pop("hidden_states_mlp_input"),
+                topk_idx=state.pop("topk_idx_local"),
+                topk_weights=state.pop("topk_weights_local"),
+                forward_mode=state.forward_batch.forward_mode,
+                tbo_subbatch_index=state.get("tbo_subbatch_index"),
+            )
+
+    def op_dispatch_b(self, state):
+        if self.ep_size > 1:
+            with get_global_expert_distribution_recorder().with_current_layer(
+                self.layer_id
+            ):
+                (
+                    state.hidden_states_experts_input,
+                    state.topk_idx_dispatched,
+                    state.topk_weights_dispatched,
+                    state.reorder_topk_ids,
+                    state.num_recv_tokens_per_expert,
+                    state.seg_indptr,
+                    state.masked_m,
+                    state.expected_m,
+                ) = self.deepep_dispatcher.dispatch_b(
+                    tbo_subbatch_index=state.get("tbo_subbatch_index"),
+                )
+
+    def op_experts(self, state):
+        state.hidden_states_experts_output = self.experts(
+            hidden_states=state.pop("hidden_states_experts_input"),
+            topk_idx=state.topk_idx_dispatched,
+            topk_weights=state.topk_weights_dispatched,
+            reorder_topk_ids=state.pop("reorder_topk_ids"),
+            seg_indptr=state.pop("seg_indptr"),
+            masked_m=state.pop("masked_m"),
+            expected_m=state.pop("expected_m"),
+            num_recv_tokens_per_expert=state.pop("num_recv_tokens_per_expert"),
+            forward_mode=state.forward_batch.forward_mode,
+        )
+
+    def op_combine_a(self, state):
+        if self.ep_size > 1:
+            self.deepep_dispatcher.combine_a(
+                hidden_states=state.pop("hidden_states_experts_output"),
+                topk_idx=state.pop("topk_idx_dispatched"),
+                topk_weights=state.pop("topk_weights_dispatched"),
+                forward_mode=state.forward_batch.forward_mode,
+                tbo_subbatch_index=state.get("tbo_subbatch_index"),
+            )
+
+    def op_combine_b(self, state):
+        if self.ep_size > 1:
+            state.hidden_states_after_combine = self.deepep_dispatcher.combine_b(
+                tbo_subbatch_index=state.get("tbo_subbatch_index"),
+            )
+
+    def op_output(self, state):
+        final_hidden_states = state.pop("hidden_states_after_combine")
+
+        if (shared_output := state.pop("shared_output")) is not None:
+            x = shared_output
+            x.add_(final_hidden_states)
+            final_hidden_states = x
+
+        state.hidden_states_mlp_output = final_hidden_states
 
 _alt_stream = None
 
@@ -439,12 +553,24 @@ class Llama4Attention(nn.Module):
         attn_scale = self._get_attn_scale(positions)
         return (q * attn_scale).to(q.dtype)
 
-    def forward(
+    def op_prepare(self, state):
+        state.attn_intermediate_state = self.forward_prepare(
+            positions=state.positions,
+            hidden_states=state.pop("hidden_states_after_comm_pre_attn"),
+            forward_batch=state.forward_batch,
+        )
+
+    def op_core(self, state):
+        state.hidden_states_after_attn = self.forward_core(
+            state.pop("attn_intermediate_state")
+        )
+
+    def forward_prepare(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
         forward_batch: ForwardBatch,
-    ) -> torch.Tensor:
+    ):
         qkv, _ = self.qkv_proj(hidden_states)
 
         qk, v = qkv.split([self.q_size + self.kv_size, self.kv_size], dim=-1)
@@ -468,10 +594,29 @@ class Llama4Attention(nn.Module):
         # https://arxiv.org/abs/2501.19399
         if self.attn_temperature_tuning and not self.use_rope:
             q = self._mul_attn_scale(positions=positions, q=q)
+        inner_state = q, k, v, forward_batch
+        return None, forward_batch, inner_state
 
-        attn_output = self.attn(q, k, v, forward_batch)
+    def forward_core(self, intermediate_state):
+        hidden_states, forward_batch, inner_state = intermediate_state
+        if inner_state is None:
+            return hidden_states
+        attn_output = self.attn(*inner_state)
         output, _ = self.o_proj(attn_output)
         return output
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+    ) -> torch.Tensor:
+        s = self.forward_prepare(
+            positions=positions,
+            hidden_states=hidden_states,
+            forward_batch=forward_batch,
+        )
+        return self.forward_core(s)
 
 
 class Llama4DecoderLayer(nn.Module):
@@ -576,6 +721,64 @@ class Llama4DecoderLayer(nn.Module):
 
         return hidden_states, residual
 
+    def op_comm_prepare_attn(
+        self,
+        state,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        forward_batch: ForwardBatch,
+        residual: Optional[torch.Tensor],
+        tbo_subbatch_index: Optional[int] = None,
+    ):
+        state.hidden_states_after_comm_pre_attn, state.residual_after_input_ln = (
+            self.layer_communicator.prepare_attn(hidden_states, residual, forward_batch)
+        )
+        state.update(
+            dict(
+                forward_batch=forward_batch,
+                positions=positions,
+                tbo_subbatch_index=tbo_subbatch_index,
+            )
+        )
+
+    def op_comm_prepare_mlp(self, state):
+        state.hidden_states_mlp_input, state.residual_after_comm_pre_mlp = (
+            self.layer_communicator.prepare_mlp(
+                state.pop("hidden_states_after_attn"),
+                state.pop("residual_after_input_ln"),
+                state.forward_batch,
+            )
+        )
+
+    def op_mlp(self, state):
+        hidden_states = state.pop("hidden_states_mlp_input")
+        state.hidden_states_mlp_output = self.mlp(
+            hidden_states, state.forward_batch.forward_mode
+        )
+    
+    def op_comm_postprocess_layer(self, state):
+        hidden_states, residual = self.layer_communicator.postprocess_layer(
+            state.pop("hidden_states_mlp_output"),
+            state.pop("residual_after_comm_pre_mlp"),
+            state.forward_batch,
+        )
+
+        output = dict(
+            positions=state.positions,
+            hidden_states=hidden_states,
+            residual=residual,
+            forward_batch=state.forward_batch,
+            tbo_subbatch_index=state.tbo_subbatch_index,
+        )
+
+        state.clear(
+            expect_keys={
+                "positions",
+                "forward_batch",
+                "tbo_subbatch_index",
+            }
+        )
+        return output
 
 class Llama4Model(nn.Module):
     def __init__(
