@@ -416,6 +416,9 @@ class CudaGraphRunner:
         )
 
     def capture(self) -> None:
+        total_capture_start_mem = torch.cuda.memory_allocated()
+        logger.info(f"CUDA graph capture process starting - Initial memory: {total_capture_start_mem / 1024**3:.2f} GB")
+        
         profile_context = empty_context()
         if self.enable_profile_cuda_graph:
             profile_context = profile(
@@ -476,8 +479,15 @@ class CudaGraphRunner:
                 )
             )
             logger.info(log_message)
+        
+        total_capture_end_mem = torch.cuda.memory_allocated()
+        total_allocated = (total_capture_end_mem - total_capture_start_mem) / 1024**3
+        logger.info(f"CUDA graph capture complete - Total allocated: {total_allocated:.2f} GB (final: {total_capture_end_mem / 1024**3:.2f} GB)")
 
     def capture_one_batch_size(self, bs: int, forward: Callable):
+        pre_capture_mem = torch.cuda.memory_allocated()
+        logger.info(f"CUDA graph capture start for bs={bs}: {pre_capture_mem / 1024**3:.2f} GB")
+        
         graph = torch.cuda.CUDAGraph()
         stream = self.stream
         num_tokens = bs * self.num_tokens_per_bs
@@ -624,6 +634,11 @@ class CudaGraphRunner:
             out = run_once()
 
         global_graph_memory_pool = graph.pool()
+        
+        post_capture_mem = torch.cuda.memory_allocated()
+        allocated_mem = (post_capture_mem - pre_capture_mem) / 1024**3
+        logger.info(f"CUDA graph capture complete for bs={bs}: {allocated_mem:.2f} GB (total: {post_capture_mem / 1024**3:.2f} GB)")
+        
         return graph, out
 
     def recapture_if_needed(self, forward_batch: ForwardBatch):

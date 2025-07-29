@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -19,6 +20,8 @@ if TYPE_CHECKING:
 
 from sgl_kernel import merge_state_v2
 from sgl_kernel.flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -1145,6 +1148,8 @@ class FlashAttentionBackend(AttentionBackend):
         This creates fixed-size tensors that will be reused during CUDA graph replay
         to avoid memory allocations.
         """
+        pre_alloc_mem = torch.cuda.memory_allocated()
+        logger.info(f"FlashAttention CUDA graph init start - Current memory: {pre_alloc_mem / 1024**3:.2f} GB")
         # This is being used by normal decode and draft decode when topk == 1
         self.decode_cuda_graph_metadata = {
             "cache_seqlens": torch.zeros(max_bs, dtype=torch.int32, device=self.device),
@@ -1174,6 +1179,7 @@ class FlashAttentionBackend(AttentionBackend):
         # Only allocate local attention buffers if local attention is enabled
         # This prevents OOM errors when local attention is not being used
         if self.attention_chunk_size is not None:
+            local_attn_mem_start = torch.cuda.memory_allocated()
             # Estimate maximum sizes for local attention metadata
             max_seq_len = self.max_context_len
             page_size = self.page_size or 1
@@ -1197,6 +1203,10 @@ class FlashAttentionBackend(AttentionBackend):
                     device=self.device,
                 ),
             }
+            
+            local_attn_mem_end = torch.cuda.memory_allocated()
+            local_attn_allocated = (local_attn_mem_end - local_attn_mem_start) / 1024**3
+            logger.info(f"Local attention metadata allocated: {local_attn_allocated:.2f} GB (chunk_size={attn_chunk_size}, max_virtual_batches={max_virtual_batches})")
 
         # This is used by draft decode's first half of metadata when topk > 1
         if self.topk > 1:
@@ -1366,6 +1376,10 @@ class FlashAttentionBackend(AttentionBackend):
                 max_bs + 1, dtype=torch.int32, device=self.device
             ),
         }
+        
+        post_alloc_mem = torch.cuda.memory_allocated()
+        allocated_mem = (post_alloc_mem - pre_alloc_mem) / 1024**3
+        logger.info(f"FlashAttention CUDA graph metadata allocated: {allocated_mem:.2f} GB (total: {post_alloc_mem / 1024**3:.2f} GB)")
 
     def init_forward_metadata_capture_cuda_graph(
         self,
