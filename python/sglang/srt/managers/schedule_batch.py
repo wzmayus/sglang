@@ -1042,8 +1042,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # FIXME: we should use self.spec_info.seq_lens instead of self.spec_info.allocate_lens
         new_needed_lens = self.spec_info.allocate_lens + (
             max(
-                bs * worker.num_steps * worker.topk,
-                bs * worker.num_draft_tokens,
+                worker.num_steps * worker.topk,
+                worker.num_draft_tokens,
             )
         )
         new_allocate_lens = torch.max(self.spec_info.allocate_lens, new_needed_lens)
