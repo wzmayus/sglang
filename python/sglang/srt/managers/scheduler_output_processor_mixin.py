@@ -248,7 +248,11 @@ class SchedulerOutputProcessorMixin:
             if self.enable_overlap and req.finished():
                 # Free the one extra delayed token
                 if self.page_size == 1:
-                    self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
+                    if batch.spec_algorithm.is_none():
+                        self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
+                    else:
+                        # TODO: how to free for overlap spec dec?
+                        pass
                 else:
                     # Only free when the extra token is in a new page
                     if (
@@ -267,6 +271,13 @@ class SchedulerOutputProcessorMixin:
 
             req.check_finished()
             if req.finished():
+                if batch.spec_algorithm.is_eagle():
+                    # TODO: is there a better way to get the indices to free?
+                    req_pool_index = batch.req_pool_indices[i]
+                    start_len = batch.spec_info.new_seq_lens[i]
+                    allocate_len = batch.spec_info.allocate_lens[i]
+                    indices_to_free = self.req_to_token_pool.req_to_token[req_pool_index][start_len:allocate_len]
+                    self.token_to_kv_pool_allocator.free(indices_to_free)
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
 
