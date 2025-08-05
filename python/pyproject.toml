@@ -13,7 +13,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
     "License :: OSI Approved :: Apache Software License",
 ]
-dependencies = ["aiohttp", "requests", "tqdm", "numpy", "IPython", "setproctitle"]
+dependencies = ["aiohttp", "requests", "tqdm", "numpy", "IPython", "setproctitle", "sentencepiece"]
 
 [project.optional-dependencies]
 runtime_common = [
@@ -41,7 +41,6 @@ runtime_common = [
     "pybase64",
     "python-multipart",
     "pyzmq>=25.1.2",
-    "sentencepiece",
     "soundfile==0.13.1",
     "scipy",
     "torchao==0.9.0",
