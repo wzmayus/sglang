@@ -65,7 +65,7 @@ from sglang.srt.model_executor.forward_batch_info import CaptureHiddenMode, Forw
 from sglang.srt.sampling.sampling_batch_info import SamplingBatchInfo
 from sglang.srt.sampling.sampling_params import SamplingParams
 from sglang.srt.server_args import ServerArgs
-from sglang.srt.utils import flatten_nested_list, next_power_of_2, support_triton
+from sglang.srt.utils import flatten_nested_list, next_power_of_2, support_triton, alloc_len_per_eagle_decode
 
 if TYPE_CHECKING:
     from sglang.srt.speculative.eagle_utils import EagleDraftInput, EagleVerifyInput
@@ -1044,12 +1044,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.verify_done.synchronize()
         
         self.seq_lens_sum = self.seq_lens.sum().item()
-        new_needed_lens = self.seq_lens + (
-            max(
-                worker.num_steps * worker.topk,
-                worker.num_draft_tokens,
-            )
-        )
+        new_needed_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
+        # why do we need a max here?
         new_allocate_lens = torch.max(self.spec_info.allocate_lens, new_needed_lens)
         num_needed_tokens = (
             (new_allocate_lens - self.spec_info.allocate_lens).sum().item()

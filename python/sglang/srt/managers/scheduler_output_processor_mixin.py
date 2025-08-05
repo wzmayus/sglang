@@ -11,7 +11,7 @@ from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.managers.io_struct import AbortReq, BatchEmbeddingOut, BatchTokenIDOut
 from sglang.srt.managers.schedule_batch import BaseFinishReason, Req, ScheduleBatch
-from sglang.srt.utils import empty_context
+from sglang.srt.utils import empty_context, alloc_len_per_eagle_decode
 
 if TYPE_CHECKING:
     from sglang.srt.managers.scheduler import (
@@ -246,13 +246,13 @@ class SchedulerOutputProcessorMixin:
                 continue
 
             if self.enable_overlap and req.finished():
-                # Free the one extra delayed token
                 if self.page_size == 1:
-                    if batch.spec_algorithm.is_none():
-                        self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
+                    if batch.spec_algorithm.is_eagle():
+                        self.free_spec_dec_tokens_page_size_1(i, req, result.spec_info, overlap=True)
                     else:
-                        # TODO: how to free for overlap spec dec?
-                        pass
+                        # not spec dec: free the one extra delayed token
+                        self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
+                        
                 else:
                     # Only free when the extra token is in a new page
                     if (
@@ -271,13 +271,9 @@ class SchedulerOutputProcessorMixin:
 
             req.check_finished()
             if req.finished():
-                if batch.spec_algorithm.is_eagle():
-                    # TODO: is there a better way to get the indices to free?
-                    req_pool_index = batch.req_pool_indices[i]
-                    start_len = batch.spec_info.new_seq_lens[i]
-                    allocate_len = batch.spec_info.allocate_lens[i]
-                    indices_to_free = self.req_to_token_pool.req_to_token[req_pool_index][start_len:allocate_len]
-                    self.token_to_kv_pool_allocator.free(indices_to_free)
+                if not self.enable_overlap and batch.spec_algorithm.is_eagle() and self.page_size == 1:
+                    self.free_spec_dec_tokens_page_size_1(i, req, batch.spec_info, overlap=False)
+
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
 
@@ -755,3 +751,15 @@ class SchedulerOutputProcessorMixin:
                 rids, finished_reasons, embeddings, prompt_tokens, cached_tokens
             )
         )
+
+    def free_spec_dec_tokens_page_size_1(self: Scheduler, batch_idx: int, req: Req, spec_info: "SpecInfo", overlap: bool):
+        # spec dec: free the extra allocated tokens
+        allocate_len = spec_info.allocate_lens[batch_idx]
+        if overlap:
+            # for overlap, the last iteration's allocation is always not used
+            start_len = allocate_len - alloc_len_per_eagle_decode(self.draft_worker)
+        else:
+            # for non-overlap, the last iteration will accept some tokens
+            start_len = spec_info.new_seq_lens[batch_idx]
+        indices_to_free = self.req_to_token_pool.req_to_token[req.req_pool_idx][start_len:allocate_len]
+        self.token_to_kv_pool_allocator.free(indices_to_free)
