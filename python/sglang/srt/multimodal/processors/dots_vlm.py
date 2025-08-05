@@ -1,13 +1,16 @@
-from typing import List, Union, Dict
-import re
-import math
 import asyncio
+import math
+import re
+from typing import Dict, List, Union
+
 from PIL import Image
+
 from sglang.srt.models.dots_vlm import DotsVLMForCausalLM
 from sglang.srt.multimodal.processors.base_processor import (
     BaseMultimodalProcessor,
     MultimodalSpecialTokens,
 )
+
 
 class DotsVLMImageProcessor(BaseMultimodalProcessor):
     models = [DotsVLMForCausalLM]
@@ -19,14 +22,13 @@ class DotsVLMImageProcessor(BaseMultimodalProcessor):
         # The regex that matches expanded image tokens.
         self.IMAGE_TOKEN_REGEX = re.compile(r"<\|img\|>(?:<\|imgpad\|>)+<\|endofimg\|>")
 
-        assert len(_processor.tokenizer.encode("<|img|>"))==1
+        assert len(_processor.tokenizer.encode("<|img|>")) == 1
         self.im_start_id = _processor.tokenizer.encode("<|img|>")[0]
         self.im_end_id = _processor.tokenizer.encode("<|endofimg|>")[0]
         self.im_token_id = _processor.tokenizer.encode("<|imgpad|>")[0]
         self.IM_TOKEN_ID = self.im_token_id
         self.IM_START_ID = self.im_start_id
         self.IM_END_ID = self.im_end_id
-
 
         vision_config = hf_config.vision_config
         patch_size = vision_config.patch_size
@@ -49,7 +51,11 @@ class DotsVLMImageProcessor(BaseMultimodalProcessor):
         if isinstance(image_data, str):
             image_data = [image_data]
 
-        if isinstance(image_data, list) and image_data and isinstance(image_data[0], list):
+        if (
+            isinstance(image_data, list)
+            and image_data
+            and isinstance(image_data[0], list)
+        ):
             image_data = sum(image_data, [])
 
         base_output = self.load_mm_data(

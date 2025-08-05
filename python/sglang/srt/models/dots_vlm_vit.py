@@ -16,11 +16,13 @@ from sglang.srt.utils import add_prefix
 def rotate_half(x):
     """Rotates half the hidden dims of the input."""
     x1 = x[..., : x.shape[-1] // 2]
-    x2 = x[..., x.shape[-1] // 2:]
+    x2 = x[..., x.shape[-1] // 2 :]
     return torch.cat((-x2, x1), dim=-1)
 
 
-def apply_rotary_pos_emb_vision(tensor: torch.Tensor, freqs: torch.Tensor) -> torch.Tensor:
+def apply_rotary_pos_emb_vision(
+    tensor: torch.Tensor, freqs: torch.Tensor
+) -> torch.Tensor:
     orig_dtype = tensor.dtype
     tensor = tensor.float()
 
@@ -44,7 +46,9 @@ class VisionRotaryEmbedding(nn.Module):
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
-        seq = torch.arange(seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype)
+        seq = torch.arange(
+            seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
+        )
         freqs = torch.outer(seq, self.inv_freq)
         return freqs
 
@@ -59,7 +63,7 @@ class PatchMerger(nn.Module):
         init_merger_std=None,
     ) -> None:
         super().__init__()
-        self.hidden_size = context_dim * (spatial_merge_size ** 2)
+        self.hidden_size = context_dim * (spatial_merge_size**2)
         self.pre_norm = pre_norm
         if self.pre_norm == "layernorm":
             self.ln_q = LayerNorm(context_dim, eps=1e-6)
@@ -86,6 +90,7 @@ class PatchMerger(nn.Module):
         else:
             x = self.mlp(x.view(-1, self.hidden_size))
         return x
+
 
 # class VisionAttention(nn.Module):
 #     def __init__(self, config, dim: int, num_heads: int = 16, bias=True) -> None:
@@ -143,13 +148,23 @@ class VisionFlashAttention2(nn.Module):
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
         q, k, v = (
-            self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
         )  # 'shd'
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
         max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max().item()
         attn_output = flash_attn_varlen_func(
-            q, k, v, cu_seqlens, cu_seqlens, max_seqlen, max_seqlen, causal=self.is_causal
+            q,
+            k,
+            v,
+            cu_seqlens,
+            cu_seqlens,
+            max_seqlen,
+            max_seqlen,
+            causal=self.is_causal,
         ).reshape(seq_length, -1)
         attn_output = self.proj(attn_output)
 
@@ -171,20 +186,33 @@ class VisionSdpaAttention(nn.Module):
         rotary_pos_emb: torch.Tensor = None,
     ) -> torch.Tensor:
         seq_length = hidden_states.shape[0]
-        q, k, v = self.qkv(hidden_states).reshape(seq_length, 3, self.num_heads, -1).permute(1, 0, 2, 3).unbind(0)
+        q, k, v = (
+            self.qkv(hidden_states)
+            .reshape(seq_length, 3, self.num_heads, -1)
+            .permute(1, 0, 2, 3)
+            .unbind(0)
+        )
 
         q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
         k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
 
-        attention_mask = torch.zeros([1, seq_length, seq_length], device=q.device, dtype=torch.bool)
+        attention_mask = torch.zeros(
+            [1, seq_length, seq_length], device=q.device, dtype=torch.bool
+        )
         for i in range(1, len(cu_seqlens)):
-            attention_mask[..., cu_seqlens[i - 1]: cu_seqlens[i], cu_seqlens[i - 1]: cu_seqlens[i]] = True
+            attention_mask[
+                ...,
+                cu_seqlens[i - 1] : cu_seqlens[i],
+                cu_seqlens[i - 1] : cu_seqlens[i],
+            ] = True
 
         q = q.transpose(0, 1)
         k = k.transpose(0, 1)
         v = v.transpose(0, 1)
 
-        attn_output = F.scaled_dot_product_attention(q, k, v, attention_mask, dropout_p=0.0)
+        attn_output = F.scaled_dot_product_attention(
+            q, k, v, attention_mask, dropout_p=0.0
+        )
         attn_output = attn_output.transpose(0, 1)
         attn_output = attn_output.reshape(seq_length, -1)
 
@@ -243,7 +271,13 @@ class DotsPatchEmbed(nn.Module):
         self.norm = RMSNorm(config.embed_dim, eps=config.rms_norm_eps)
 
     def forward(self, x: torch.Tensor, grid_thw=None) -> torch.Tensor:
-        x = x.view(-1, self.num_channels, self.temporal_patch_size, self.patch_size, self.patch_size)[:, :, 0]
+        x = x.view(
+            -1,
+            self.num_channels,
+            self.temporal_patch_size,
+            self.patch_size,
+            self.patch_size,
+        )[:, :, 0]
         x = self.proj(x).view(-1, self.embed_dim)
         x = self.norm(x)
         return x
@@ -309,8 +343,13 @@ class DotsVisionBlock(nn.Module):
 #     "sdpa": VisionSdpaAttention,
 # }
 
+
 class DotsVisionTransformer(PreTrainedModel):
-    def __init__(self, config: DotsVisionConfig, quant_config: Optional[QuantizationConfig] = None) -> None:
+    def __init__(
+        self,
+        config: DotsVisionConfig,
+        quant_config: Optional[QuantizationConfig] = None,
+    ) -> None:
         super().__init__(config)
         self.config = config
         self.spatial_merge_size = config.spatial_merge_size
@@ -324,7 +363,10 @@ class DotsVisionTransformer(PreTrainedModel):
 
         _num_hidden_layers = config.num_hidden_layers
         self.blocks = nn.ModuleList(
-            [DotsVisionBlock(config, config.attn_implementation, quant_config) for _ in range(_num_hidden_layers)]
+            [
+                DotsVisionBlock(config, config.attn_implementation, quant_config)
+                for _ in range(_num_hidden_layers)
+            ]
         )
 
         if self.config.post_norm:
@@ -381,9 +423,7 @@ class DotsVisionTransformer(PreTrainedModel):
             )
             wpos_ids = wpos_ids.permute(0, 2, 1, 3)
             wpos_ids = wpos_ids.flatten()
-            pos_ids.append(
-                torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1)
-            )
+            pos_ids.append(torch.stack([hpos_ids, wpos_ids], dim=-1).repeat(t, 1))
 
         return pos_ids
 
@@ -395,14 +435,18 @@ class DotsVisionTransformer(PreTrainedModel):
         rotary_pos_emb = rotary_pos_emb_full[pos_ids].flatten(1)
         return rotary_pos_emb
 
-    def forward(self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, bf16=True) -> torch.Tensor:
+    def forward(
+        self, hidden_states: torch.Tensor, grid_thw: torch.Tensor, bf16=True
+    ) -> torch.Tensor:
         if bf16:
             hidden_states = hidden_states.bfloat16()
         hidden_states = self.patch_embed(hidden_states, grid_thw)
 
         rotary_pos_emb = self.rot_pos_emb(grid_thw)
 
-        cu_seqlens = torch.repeat_interleave(grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]).cumsum(
+        cu_seqlens = torch.repeat_interleave(
+            grid_thw[:, 1] * grid_thw[:, 2], grid_thw[:, 0]
+        ).cumsum(
             dim=0,
             dtype=grid_thw.dtype if torch.jit.is_tracing() else torch.int32,
         )
@@ -415,10 +459,15 @@ class DotsVisionTransformer(PreTrainedModel):
                     hidden_states,
                     cu_seqlens,
                     rotary_pos_emb,
-                    use_reentrant=(self.config.ckpt_use_reentrant or self.config.ve_ckpt_use_reentrant),
+                    use_reentrant=(
+                        self.config.ckpt_use_reentrant
+                        or self.config.ve_ckpt_use_reentrant
+                    ),
                 )
             else:
-                hidden_states = blk(hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb)
+                hidden_states = blk(
+                    hidden_states, cu_seqlens=cu_seqlens, rotary_pos_emb=rotary_pos_emb
+                )
 
         if self.config.post_norm:
             hidden_states = self.post_trunk_norm(hidden_states)

@@ -376,7 +376,7 @@ class Conversation:
                 ret += role
                 if message:
                     ret += message
-                if i < len(self.messages)-1:
+                if i < len(self.messages) - 1:
                     ret += seps[i % 2]
             return ret
         else:

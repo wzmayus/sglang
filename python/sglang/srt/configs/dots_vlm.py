@@ -1,19 +1,19 @@
-from typing import Optional
-from sglang.srt.configs.deepseekvl2 import (
-    DeepseekV2Config,
-)
-from typing import Any, Optional, List, Union
+from typing import Any, List, Optional, Union
+
 from transformers import (
     AutoProcessor,
     LlamaTokenizerFast,
     PretrainedConfig,
     ProcessorMixin,
 )
+
 # from transformers.models.auto.configuration_auto import CONFIG_MAPPING
 from transformers.feature_extraction_utils import BatchFeature
 from transformers.image_utils import ImageInput
 from transformers.processing_utils import ProcessingKwargs, Unpack
 from transformers.tokenization_utils_base import PreTokenizedInput, TextInput
+
+from sglang.srt.configs.deepseekvl2 import DeepseekV2Config
 
 
 class DotsVisionConfig(PretrainedConfig):
@@ -257,5 +257,6 @@ class DotsVLMProcessor(ProcessorMixin):
             dict.fromkeys(tokenizer_input_names + image_processor_input_names)
         )
         return names_from_processor
+
 
 AutoProcessor.register(DotsVLMConfig, DotsVLMProcessor)

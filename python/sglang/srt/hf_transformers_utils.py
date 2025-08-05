@@ -36,10 +36,10 @@ from sglang.srt.configs import (
     ChatGLMConfig,
     DbrxConfig,
     DeepseekVL2Config,
+    DotsVLMConfig,
     ExaoneConfig,
     KimiVLConfig,
     MultiModalityConfig,
-    DotsVLMConfig,
 )
 from sglang.srt.configs.internvl import InternVLChatConfig
 from sglang.srt.connector import create_remote_connector
