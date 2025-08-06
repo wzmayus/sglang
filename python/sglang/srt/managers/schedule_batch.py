@@ -885,6 +885,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     # Speculative decoding
     spec_algorithm: Optional[SpeculativeAlgorithm] = None
     spec_info: Optional[SpecInfo] = None
+    verify_done: Optional[torch.cuda.Event] = None
     draft_worker: Optional["EagleWorker"] = None
 
     @classmethod
@@ -1044,9 +1045,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.verify_done.synchronize()
         
         self.seq_lens_sum = self.seq_lens.sum().item()
-        new_needed_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
-        # why do we need a max here?
-        new_allocate_lens = torch.max(self.spec_info.allocate_lens, new_needed_lens)
+        new_allocate_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
+        assert torch.all(new_allocate_lens >= self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
         num_needed_tokens = (
             (new_allocate_lens - self.spec_info.allocate_lens).sum().item()
         )
