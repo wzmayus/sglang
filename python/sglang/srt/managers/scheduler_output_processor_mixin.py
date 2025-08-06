@@ -55,6 +55,8 @@ class SchedulerOutputProcessorMixin:
                 result.copy_done,
             )
 
+            # current stream is scheduler_stream, copy_done is in forward_stream, sync with the forward_stream
+            # to ensure GPU tensors are ready to be copied to CPU
             if copy_done is not None:
                 copy_done.synchronize()
 
@@ -208,6 +210,8 @@ class SchedulerOutputProcessorMixin:
         )
         self.num_generated_tokens += len(batch.reqs)
 
+        # copy_done is in forward_stream, sync with the forward_stream
+        # to ensure GPU tensors are ready to be copied to CPU
         if copy_done is not None:
             ctx = torch.cuda.stream(self.copy_stream)
             copy_done.synchronize()
@@ -215,6 +219,8 @@ class SchedulerOutputProcessorMixin:
             ctx = empty_context()
 
         with ctx:
+            # copy_stream
+            # tolist() calls copy from GPU to CPU, thus CPU blocking
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:
                 next_token_logprobs = logits_output.next_token_logprobs.tolist()
@@ -235,6 +241,8 @@ class SchedulerOutputProcessorMixin:
                     self.num_generated_tokens += accept_length_cpu[i]
                 self.spec_num_total_accepted_tokens += sum(accept_length_cpu)
                 self.spec_num_total_forward_ct += len(batch.reqs)
+
+        print(f"DEBUG----: process_batch_result_decode: {self.spec_num_total_forward_ct=}, {batch=}, {result.spec_info=}")
 
         self.token_to_kv_pool_allocator.free_group_begin()
 
@@ -275,6 +283,7 @@ class SchedulerOutputProcessorMixin:
                     self.free_spec_dec_tokens_page_size_1(i, req, batch.spec_info, overlap=False)
 
                 self.tree_cache.cache_finished_req(req)
+                # print(f"DEBUG----: cache finished req: {req.rid=}, {req.origin_input_ids=}, {req.output_ids=}")
                 req.time_stats.completion_time = time.time()
 
             if req.return_logprob and batch.spec_algorithm.is_none():
