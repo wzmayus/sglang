@@ -1609,6 +1609,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         chunked_req_to_exclude: Optional[Union[Req, List[Req]]] = None,
         keep_indices: Optional[List[int]] = None,
     ):
+        if self.verify_done is not None:
+            self.verify_done.wait()
+
         if keep_indices is None:
             if isinstance(chunked_req_to_exclude, Req):
                 chunked_req_to_exclude = [chunked_req_to_exclude]
@@ -1665,6 +1668,11 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
         # orchestrator.merge() depends on Batch.reqs during preparation of each penalizers, so it
         # needs to be called with pre-merged Batch.reqs.
+        if self.verify_done is not None:
+            self.verify_done.wait()
+        if other.verify_done is not None:
+            other.verify_done.wait()
+
         self.sampling_info.merge_batch(other.sampling_info)
 
         # Encoder-decoder infos

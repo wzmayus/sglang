@@ -71,6 +71,7 @@ class EagleDraftInput:
         self.hidden_states = self.hidden_states[: len(new_indices)]
         self.verified_id = self.verified_id[: len(new_indices)]
         self.allocate_lens = self.allocate_lens[: len(new_indices)]
+        self.new_seq_lens = self.new_seq_lens[: len(new_indices)]
 
     def merge_batch(self, spec_info: EagleDraftInput):
         self.topk_p = torch.cat([self.topk_p, spec_info.topk_p])
@@ -82,6 +83,7 @@ class EagleDraftInput:
         self.allocate_lens = torch.cat(
             [self.allocate_lens, spec_info.allocate_lens], axis=0
         )
+        self.new_seq_lens = torch.cat([self.new_seq_lens, spec_info.new_seq_lens], axis=0)
 
     def prepare_for_draft(
         self,
