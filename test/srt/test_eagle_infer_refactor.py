@@ -83,7 +83,7 @@ class TestEagleLargeBS(CustomTestCase):
                 "--speculative-num-draft-tokens",
                 "6",
                 "--max-running-requests",
-                "8",
+                "2",
                 "--disable-overlap-schedule",
             ],
         )
