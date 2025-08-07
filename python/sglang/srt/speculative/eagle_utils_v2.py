@@ -66,12 +66,12 @@ class EagleDraftInput:
     verify_done: torch.cuda.Event = None
 
     def filter_batch(self, new_indices: torch.Tensor):
-        self.topk_p = self.topk_p[: len(new_indices)]
-        self.topk_index = self.topk_index[: len(new_indices)]
-        self.hidden_states = self.hidden_states[: len(new_indices)]
-        self.verified_id = self.verified_id[: len(new_indices)]
-        self.allocate_lens = self.allocate_lens[: len(new_indices)]
-        self.new_seq_lens = self.new_seq_lens[: len(new_indices)]
+        self.topk_p = self.topk_p[new_indices]
+        self.topk_index = self.topk_index[new_indices]
+        self.hidden_states = self.hidden_states[new_indices]
+        self.verified_id = self.verified_id[new_indices]
+        self.allocate_lens = self.allocate_lens[new_indices]
+        self.new_seq_lens = self.new_seq_lens[new_indices]
 
     def merge_batch(self, spec_info: EagleDraftInput):
         self.topk_p = torch.cat([self.topk_p, spec_info.topk_p])
