@@ -649,7 +649,9 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
                 f"into parameter ({param.size()})"
             )
 
-            param.data.copy_(loaded_weight)
+            # Use non_blocking=True for potential async GPU transfer speedup
+            # especially beneficial for large batches of weight updates
+            param.data.copy_(loaded_weight, non_blocking=True)
     except Exception:
         # NOTE: This exception is added for the purpose of setting breakpoint to
         # debug weight loading issues.

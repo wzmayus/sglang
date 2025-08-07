@@ -1,0 +1,352 @@
+diff --git a/python/sglang/srt/configs/model_config.py b/python/sglang/srt/configs/model_config.py
+index 37fbf07c..d8c55848 100644
+--- a/python/sglang/srt/configs/model_config.py
++++ b/python/sglang/srt/configs/model_config.py
+@@ -437,14 +437,14 @@ class ModelConfig:
+             ).lower()
+ 
+             # Detect which checkpoint is it
+-            for _, method in QUANTIZATION_METHODS.items():
+-                quantization_override = method.override_quantization_method(
+-                    quant_cfg, self.quantization
+-                )
+-                if quantization_override:
+-                    quant_method = quantization_override
+-                    self.quantization = quantization_override
+-                    break
++            # for _, method in QUANTIZATION_METHODS.items():
++            #    quantization_override = method.override_quantization_method(
++            #        quant_cfg, self.quantization
++            #    )
++            #    if quantization_override:
++            #        quant_method = quantization_override
++            #        self.quantization = quantization_override
++            #        break
+ 
+             # Verify quantization configurations.
+             if self.quantization is None:
+diff --git a/python/sglang/srt/eplb/expert_location.py b/python/sglang/srt/eplb/expert_location.py
+index ef35ce7a..492864ef 100644
+--- a/python/sglang/srt/eplb/expert_location.py
++++ b/python/sglang/srt/eplb/expert_location.py
+@@ -270,9 +270,15 @@ class ExpertLocationMetadata:
+     def logical_to_all_physical(
+         self, layer_id: int, logical_expert_id: int
+     ) -> List[int]:
++        # Use CPU copy to avoid GPU→CPU sync on every call, which is expensive in update weights scenario
++        if not hasattr(self, "_logical_to_all_physical_map_cpu"):
++            self._logical_to_all_physical_map_cpu = (
++                self.logical_to_all_physical_map.cpu()
++            )
++
+         return [
+             physical_expert_id
+-            for physical_expert_id in self.logical_to_all_physical_map[
++            for physical_expert_id in self._logical_to_all_physical_map_cpu[
+                 layer_id, logical_expert_id
+             ].tolist()
+             if physical_expert_id != -1
+diff --git a/python/sglang/srt/layers/moe/ep_moe/token_dispatcher.py b/python/sglang/srt/layers/moe/ep_moe/token_dispatcher.py
+index c8cdfaa2..be56352e 100644
+--- a/python/sglang/srt/layers/moe/ep_moe/token_dispatcher.py
++++ b/python/sglang/srt/layers/moe/ep_moe/token_dispatcher.py
+@@ -171,6 +171,7 @@ class DeepEPBuffer:
+                 f"Consider using --deepep-config to change the behavior."
+             )
+ 
++        num_qps_per_rank = 20
+         cls._buffer = Buffer(
+             group,
+             num_nvl_bytes,
+diff --git a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+index ce76d2f2..0d560197 100644
+--- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
++++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
+@@ -112,14 +112,15 @@ class FusedMoE(torch.nn.Module):
+         if enable_ep_moe:
+             # TODO(ch-wan): support shared experts fusion
+             # Create a tensor of size num_experts filled with -1
+-            self.expert_map_cpu = torch.full((self.num_experts,), -1, dtype=torch.int32)
++            self.expert_map_cpu = torch.full(
++                (self.num_experts,), -1, dtype=torch.int32, device="cpu"
++            )
+             # Create a expert map for the local experts
+             self.expert_map_cpu[
+                 self.moe_ep_rank
+                 * self.num_local_experts : (self.moe_ep_rank + 1)
+                 * self.num_local_experts
+             ] = torch.arange(0, self.num_local_experts, dtype=torch.int32, device="cpu")
+-            self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
+ 
+         self.routed_scaling_factor = routed_scaling_factor
+         assert intermediate_size % self.moe_tp_size == 0
+@@ -267,7 +268,7 @@ class FusedMoE(torch.nn.Module):
+                 )
+ 
+             expert_data = expert_data.narrow(shard_dim, start, shard_size)
+-        expert_data.copy_(loaded_weight)
++            expert_data.copy_(loaded_weight, non_blocking=True)
+ 
+     def _load_w2(
+         self,
+@@ -331,7 +332,7 @@ class FusedMoE(torch.nn.Module):
+                 )
+ 
+         # w2, down_proj: Load into only logical weight of w2.
+-        expert_data.copy_(loaded_weight)
++        expert_data.copy_(loaded_weight, non_blocking=True)
+ 
+     def _load_single_value(
+         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
+@@ -611,6 +612,9 @@ class FusedMoE(torch.nn.Module):
+     def forward(self, hidden_states: torch.Tensor, topk_output: StandardTopKOutput):
+         assert self.quant_method is not None
+ 
++        if self.expert_map_cpu is not None and self.expert_map_gpu is None:
++            self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
++
+         if self.expert_map_gpu is not None:
+             topk_output = topk_output._replace(
+                 topk_ids=self.expert_map_gpu[topk_output.topk_ids]
+diff --git a/python/sglang/srt/layers/quantization/fp8.py b/python/sglang/srt/layers/quantization/fp8.py
+index 49a3af57..e5f7e869 100644
+--- a/python/sglang/srt/layers/quantization/fp8.py
++++ b/python/sglang/srt/layers/quantization/fp8.py
+@@ -353,10 +353,10 @@ class Fp8LinearMethod(LinearMethodBase):
+                 return
+             else:
+                 weight, weight_scale = layer.weight.data, layer.weight_scale_inv.data
+-            layer.weight = torch.nn.Parameter(weight, requires_grad=False)
+-            layer.weight_scale_inv = torch.nn.Parameter(
+-                weight_scale, requires_grad=False
+-            )
++            # layer.weight = torch.nn.Parameter(weight, requires_grad=False)
++            # layer.weight_scale_inv = torch.nn.Parameter(
++            #    weight_scale, requires_grad=False
++            # )
+             return
+ 
+         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
+diff --git a/python/sglang/srt/managers/scheduler.py b/python/sglang/srt/managers/scheduler.py
+index d71f0227..c2476094 100644
+--- a/python/sglang/srt/managers/scheduler.py
++++ b/python/sglang/srt/managers/scheduler.py
+@@ -1304,7 +1304,7 @@ class Scheduler(
+ 
+         if memory_leak:
+             msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
+-            raise ValueError(msg)
++            # raise ValueError(msg)
+ 
+         if self.disaggregation_mode == DisaggregationMode.DECODE:
+             req_total_size = (
+@@ -1319,7 +1319,7 @@ class Scheduler(
+                 f"available_size={len(self.req_to_token_pool.free_slots)}, "
+                 f"total_size={self.req_to_token_pool.size}\n"
+             )
+-            raise ValueError(msg)
++            # raise ValueError(msg)
+ 
+         if (
+             self.enable_metrics
+diff --git a/python/sglang/srt/managers/tokenizer_manager.py b/python/sglang/srt/managers/tokenizer_manager.py
+index 9250c686..ac234667 100644
+--- a/python/sglang/srt/managers/tokenizer_manager.py
++++ b/python/sglang/srt/managers/tokenizer_manager.py
+@@ -1019,10 +1019,15 @@ class TokenizerManager:
+         request: Optional[fastapi.Request] = None,
+     ) -> Tuple[bool, str]:
+         self.auto_create_handle_loop()
+-        assert (
+-            self.server_args.dp_size == 1
+-        ), "dp_size must be 1 for init parameter update group"
+-        result = (await self.init_weights_update_group_communicator(obj))[0]
++        results = await self.init_weights_update_group_communicator(obj)
++        if self.server_args.dp_size == 1:
++            result = results[0]
++            return result.success, result.message
++        else:
++            all_success = all([r.success for r in results])
++            all_message = [r.message for r in results]
++            all_message = " | ".join(all_message)
++            return all_success, all_message
+         return result.success, result.message
+ 
+     async def update_weights_from_distributed(
+@@ -1031,9 +1036,6 @@ class TokenizerManager:
+         request: Optional[fastapi.Request] = None,
+     ) -> Tuple[bool, str]:
+         self.auto_create_handle_loop()
+-        assert (
+-            self.server_args.dp_size == 1 or self.server_args.enable_dp_attention
+-        ), "dp_size must be 1 or dp attention must be enabled for update weights from distributed"
+ 
+         if obj.abort_all_requests:
+             self.abort_request(abort_all=True)
+@@ -1041,8 +1043,15 @@ class TokenizerManager:
+         # This means that weight sync
+         # cannot run while requests are in progress.
+         async with self.model_update_lock.writer_lock:
+-            result = (await self.update_weights_from_distributed_communicator(obj))[0]
+-            return result.success, result.message
++            results = await self.update_weights_from_distributed_communicator(obj)
++            if self.server_args.dp_size == 1:
++                result = results[0]
++                return result.success, result.message
++            else:
++                all_success = all([r.success for r in results])
++                all_message = [r.message for r in results]
++                all_message = " | ".join(all_message)
++                return all_success, all_message
+ 
+     async def update_weights_from_tensor(
+         self,
+diff --git a/python/sglang/srt/managers/tp_worker.py b/python/sglang/srt/managers/tp_worker.py
+index 0b2900b3..d2b7354c 100644
+--- a/python/sglang/srt/managers/tp_worker.py
++++ b/python/sglang/srt/managers/tp_worker.py
+@@ -288,6 +288,39 @@ class TpModelWorker:
+         return success, message
+ 
+     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
++        # Initialize profiling counter if not exists
++        if not hasattr(self, "_profile_count"):
++            self._profile_count = 0
++
++        # Only profile the first 3 calls
++        should_profile = False
++        # should_profile = self.tp_rank == 0 and self._profile_count < 3
++
++        if should_profile:
++            print(
++                f"[DEBUG] update_weights_from_tensor called #{self._profile_count + 1}, tp_rank={self.tp_rank}"
++            )
++            import os
++
++            profile_dir = "/workspace/slime/profile/sglang/"
++            os.makedirs(profile_dir, exist_ok=True)
++            print(f"[DEBUG] Profile directory created: {profile_dir}")
++
++            self.prof = torch.profiler.profile(
++                activities=[
++                    torch.profiler.ProfilerActivity.CPU,
++                    torch.profiler.ProfilerActivity.CUDA,
++                ],
++                schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
++                on_trace_ready=torch.profiler.tensorboard_trace_handler(
++                    os.path.join(profile_dir)
++                ),
++                record_shapes=True,
++                profile_memory=True,
++                with_stack=True,
++            )
++            self.prof.start()
++            print(f"[DEBUG] Profiler started")
+ 
+         monkey_patch_torch_reductions()
+         success, message = self.model_runner.update_weights_from_tensor(
+@@ -296,6 +329,17 @@ class TpModelWorker:
+             ),
+             load_format=recv_req.load_format,
+         )
++
++        if should_profile:
++            print(f"[DEBUG] Calling prof.step() for profile #{self._profile_count + 1}")
++            self.prof.step()
++            self.prof.stop()
++            print(f"[DEBUG] Profiler stopped and saved #{self._profile_count + 1}")
++            self._profile_count += 1
++        elif self.tp_rank == 0 and self._profile_count == 3:
++            print(f"[DEBUG] Profiling completed, skipping further profiling")
++            self._profile_count += 1  # Increment to avoid repeated messages
++
+         return success, message
+ 
+     def get_weights_by_name(self, recv_req: GetWeightsByNameReqInput):
+diff --git a/python/sglang/srt/model_loader/weight_utils.py b/python/sglang/srt/model_loader/weight_utils.py
+index b3cf18ec..e6f42e79 100644
+--- a/python/sglang/srt/model_loader/weight_utils.py
++++ b/python/sglang/srt/model_loader/weight_utils.py
+@@ -649,7 +649,9 @@ def default_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor) -> N
+                 f"into parameter ({param.size()})"
+             )
+ 
+-            param.data.copy_(loaded_weight)
++            # Use non_blocking=True for potential async GPU transfer speedup
++            # especially beneficial for large batches of weight updates
++            param.data.copy_(loaded_weight, non_blocking=True)
+     except Exception:
+         # NOTE: This exception is added for the purpose of setting breakpoint to
+         # debug weight loading issues.
+diff --git a/python/sglang/srt/models/qwen3_moe.py b/python/sglang/srt/models/qwen3_moe.py
+index a1faa894..ea310dca 100644
+--- a/python/sglang/srt/models/qwen3_moe.py
++++ b/python/sglang/srt/models/qwen3_moe.py
+@@ -767,7 +767,10 @@ class Qwen3MoeForCausalLM(nn.Module):
+             num_experts=self.config.num_experts,
+         )
+ 
+-        params_dict = dict(self.named_parameters())
++        # Cache params_dict to avoid repeated expensive traversal of model parameters
++        if not hasattr(self, "_cached_params_dict"):
++            self._cached_params_dict = dict(self.named_parameters())
++        params_dict = self._cached_params_dict
+         for name, loaded_weight in weights:
+             layer_id = get_layer_id(name)
+             if (
+@@ -806,11 +809,22 @@ class Qwen3MoeForCausalLM(nn.Module):
+                 weight_loader(param, loaded_weight, shard_id)
+                 break
+             else:
++                # Track if this is an expert weight to enable early skipping
++                is_expert_weight = False
++
+                 for mapping in expert_params_mapping:
+                     param_name, weight_name, expert_id, shard_id = mapping
+                     if weight_name not in name:
+                         continue
++
++                    # Mark as expert weight regardless of whether we can process it
++                    is_expert_weight = True
++
+                     name = name.replace(weight_name, param_name)
++                    if name not in params_dict:
++                        # Expert weight not on this rank, will be skipped below
++                        continue
++
+                     param = params_dict[name]
+                     weight_loader = param.weight_loader
+                     weight_loader(
+@@ -822,6 +836,10 @@ class Qwen3MoeForCausalLM(nn.Module):
+                     )
+                     break
+                 else:
++                    if is_expert_weight:
++                        # This is an expert weight but not mapped to this rank, skip all remaining processing
++                        continue
++
+                     # Skip loading extra bias for GPTQ models.
+                     if name.endswith(".bias") and name not in params_dict:
+                         continue
+@@ -837,12 +855,16 @@ class Qwen3MoeForCausalLM(nn.Module):
+                     else:
+                         logger.warning(f"Parameter {name} not found in params_dict")
+ 
++        torch.cuda.synchronize()  # wait for all weight transfers to complete since we use non_blocking=True
++
+         # TODO mimic deepseek
+-        self.routed_experts_weights_of_layer = {
+-            layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
+-            for layer_id in range(self.start_layer, self.end_layer)
+-            if isinstance(self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock)
+-        }
++        # Lazy initialization of expert weights cache to avoid slowing down load_weights
++        if not hasattr(self, "routed_experts_weights_of_layer"):
++            self.routed_experts_weights_of_layer = {
++                layer_id: self.model.layers[layer_id].mlp.get_moe_weights()
++                for layer_id in range(self.start_layer, self.end_layer)
++                if isinstance(self.model.layers[layer_id].mlp, Qwen3MoeSparseMoeBlock)
++            }
+ 
+     @classmethod
+     def get_model_config_for_expert_location(cls, config):

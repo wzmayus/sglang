@@ -134,6 +134,108 @@ UNBALANCED_MODEL_LOADING_TIMEOUT_S = 300
 logger = logging.getLogger(__name__)
 
 
+@dataclass
+class FlattenedTensorMetadata:
+    """Metadata for a tensor in a flattened bucket"""
+
+    name: str
+    shape: torch.Size
+    dtype: torch.dtype
+    start_idx: int
+    end_idx: int
+    numel: int
+
+
+class FlattenedTensorBucket:
+    """
+    A bucket that flattens multiple tensors into a single tensor for efficient processing
+    while preserving all metadata needed for reconstruction.
+    """
+
+    def __init__(
+        self,
+        named_tensors: List[Tuple[str, torch.Tensor]] = None,
+        flattened_tensor: torch.Tensor = None,
+        metadata: List[FlattenedTensorMetadata] = None,
+    ):
+        """
+        Initialize a tensor bucket from a list of named tensors OR from pre-flattened data.
+        Args:
+            named_tensors: List of (name, tensor) tuples (for creating new bucket)
+            flattened_tensor: Pre-flattened tensor (for reconstruction)
+            metadata: Pre-computed metadata (for reconstruction)
+        """
+        if named_tensors is not None:
+            # Create bucket from named tensors
+            self.metadata: List[FlattenedTensorMetadata] = [None] * len(named_tensors)
+            self.flattened_tensor: torch.Tensor = None
+
+            if not named_tensors:
+                raise ValueError("Cannot create empty tensor bucket")
+
+            # Collect metadata and flatten tensors
+            current_idx = 0
+            flattened_tensors: List[torch.Tensor] = [None] * len(named_tensors)
+
+            for i, (name, tensor) in enumerate(named_tensors):
+                flattened = tensor.flatten()
+                flattened_tensors[i] = flattened
+
+                # Store metadata
+
+                numel = flattened.numel()
+                metadata_obj = FlattenedTensorMetadata(
+                    name=name,
+                    shape=tensor.shape,
+                    dtype=tensor.dtype,
+                    start_idx=current_idx,
+                    end_idx=current_idx + numel,
+                    numel=numel,
+                )
+                self.metadata[i] = metadata_obj
+                current_idx += numel
+
+            # Concatenate all flattened tensors
+            self.flattened_tensor = torch.cat(flattened_tensors, dim=0)
+        else:
+            # Initialize from pre-flattened data
+            if flattened_tensor is None or metadata is None:
+                raise ValueError(
+                    "Must provide either named_tensors or both flattened_tensor and metadata"
+                )
+            self.flattened_tensor = flattened_tensor
+            self.metadata = metadata
+
+    def get_flattened_tensor(self) -> torch.Tensor:
+        """Get the flattened tensor containing all bucket tensors"""
+        return self.flattened_tensor
+
+    def get_metadata(self) -> List[FlattenedTensorMetadata]:
+        """Get metadata for all tensors in the bucket"""
+        return self.metadata
+
+    def reconstruct_tensors(self) -> List[Tuple[str, torch.Tensor]]:
+        """
+        Reconstruct original tensors from flattened tensor with optimized performance.
+        Uses memory-efficient operations to minimize allocations and copies.
+        """
+        # preallocate the result list
+        reconstructed = [None] * len(self.metadata)
+
+        for i, meta in enumerate(self.metadata):
+            # use narrow to do zero-copy slice
+            # tensor_slice = self.flattened_tensor.narrow(0, meta.start_idx, meta.numel)
+            tensor = self.flattened_tensor[meta.start_idx : meta.end_idx].reshape(meta.shape)
+
+            # batch dtype conversion (if needed)
+            if tensor.dtype != meta.dtype:
+                tensor = tensor.to(meta.dtype)
+
+            reconstructed[i] = (meta.name, tensor)
+
+        return reconstructed
+
+
 class RankZeroFilter(logging.Filter):
     """Filter that only allows INFO level logs from rank 0, but allows all other levels from any rank."""
 
@@ -862,11 +964,20 @@ class ModelRunner:
 
     def update_weights_from_tensor(
         self,
-        named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]],
+        named_tensors: List[Tuple[str, Union[torch.Tensor, "LocalSerializedTensor"]]], # todo: add dict as well
         load_format: Optional[str] = None,
     ):
+        if load_format == "flattened_bucket":
+            # Handle flattened bucket format
+            return self._update_weights_from_flattened_bucket(
+                flattened_tensor_bucket_dict=named_tensors
+            )
+
+        monkey_patch_torch_reductions()
+        # We need to get device after patch otherwist the device would be wrong
+        infered_device = torch.cuda.current_device()
         named_tensors = [
-            (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank))
+            (name, _unwrap_tensor(tensor, tp_rank=self.tp_rank, device=infered_device))
             for name, tensor in named_tensors
         ]
         if load_format == "direct":
@@ -878,6 +989,38 @@ class ModelRunner:
             self.model.load_weights(named_tensors)
         else:
             raise NotImplementedError(f"Unknown load_format={load_format}")
+        return True, "Success"
+
+    def _update_weights_from_flattened_bucket(
+        self,
+        flattened_tensor_bucket_dict,
+    ):
+        """Handle flattened bucket format for weight updates"""
+        flattened_tensor = flattened_tensor_bucket_dict["flattened_tensor"]
+        metadata = flattened_tensor_bucket_dict["metadata"]
+
+        # Convert metadata dict to our format
+        converted_metadata = []
+        for meta in metadata:
+            converted_meta = FlattenedTensorMetadata(
+                name=meta.name,
+                shape=meta.shape,
+                dtype=meta.dtype,
+                start_idx=meta.start_idx,
+                end_idx=meta.end_idx,
+                numel=meta.numel,
+            )
+            converted_metadata.append(converted_meta)
+
+        # Create bucket and reconstruct tensors
+        bucket = FlattenedTensorBucket(
+            flattened_tensor=flattened_tensor, metadata=converted_metadata
+        )
+        reconstructed_tensors = bucket.reconstruct_tensors()
+
+        # Load the reconstructed tensors using the standard method
+        self.model.load_weights(reconstructed_tensors)
+
         return True, "Success"
 
     def get_weights_by_name(
@@ -1756,11 +1899,11 @@ def _model_load_weights_direct(model, named_tensors: List[Tuple[str, torch.Tenso
         default_weight_loader(params_dict[name], tensor)
 
 
-def _unwrap_tensor(tensor, tp_rank):
+def _unwrap_tensor(tensor, tp_rank, device):
     if isinstance(tensor, LocalSerializedTensor):
         monkey_patch_torch_reductions()
         tensor = tensor.get(tp_rank)
-    return tensor.to(torch.cuda.current_device())
+    return tensor.to(device)
 
 
 @dataclass

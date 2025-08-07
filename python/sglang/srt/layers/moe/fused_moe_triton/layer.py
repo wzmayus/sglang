@@ -112,14 +112,15 @@ class FusedMoE(torch.nn.Module):
         if enable_ep_moe:
             # TODO(ch-wan): support shared experts fusion
             # Create a tensor of size num_experts filled with -1
-            self.expert_map_cpu = torch.full((self.num_experts,), -1, dtype=torch.int32)
+            self.expert_map_cpu = torch.full(
+                (self.num_experts,), -1, dtype=torch.int32, device="cpu"
+            )
             # Create a expert map for the local experts
             self.expert_map_cpu[
                 self.moe_ep_rank
                 * self.num_local_experts : (self.moe_ep_rank + 1)
                 * self.num_local_experts
             ] = torch.arange(0, self.num_local_experts, dtype=torch.int32, device="cpu")
-            self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
 
         self.routed_scaling_factor = routed_scaling_factor
         assert intermediate_size % self.moe_tp_size == 0
@@ -267,7 +268,7 @@ class FusedMoE(torch.nn.Module):
                 )
 
             expert_data = expert_data.narrow(shard_dim, start, shard_size)
-        expert_data.copy_(loaded_weight)
+        expert_data.copy_(loaded_weight, non_blocking=False)
 
     def _load_w2(
         self,
@@ -331,7 +332,7 @@ class FusedMoE(torch.nn.Module):
                 )
 
         # w2, down_proj: Load into only logical weight of w2.
-        expert_data.copy_(loaded_weight)
+        expert_data.copy_(loaded_weight, non_blocking=True)
 
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
@@ -611,6 +612,9 @@ class FusedMoE(torch.nn.Module):
     def forward(self, hidden_states: torch.Tensor, topk_output: StandardTopKOutput):
         assert self.quant_method is not None
 
+        if self.expert_map_cpu is not None and self.expert_map_gpu is None:
+            self.expert_map_gpu = self.expert_map_cpu.to(device="cuda")
+
         if self.expert_map_gpu is not None:
             topk_output = topk_output._replace(
                 topk_ids=self.expert_map_gpu[topk_output.topk_ids]
@@ -650,24 +654,26 @@ class FusedMoE(torch.nn.Module):
         num_experts: int,
     ) -> List[Tuple[str, str, int, str]]:
 
+        # Precompute conditions for better performance
+        w13_weight_names = {ckpt_gate_proj_name, ckpt_up_proj_name}
+
+        # Precompute the weight mappings to avoid repeated list creation
+        weight_mappings = [
+            ("w1", ckpt_gate_proj_name),
+            ("w2", ckpt_down_proj_name),
+            ("w3", ckpt_up_proj_name),
+        ]
+
         return [
             # (param_name, weight_name, expert_id, shard_id)
             (
-                (
-                    "experts.w13_"
-                    if weight_name in [ckpt_gate_proj_name, ckpt_up_proj_name]
-                    else "experts.w2_"
-                ),
+                "experts.w13_" if weight_name in w13_weight_names else "experts.w2_",
                 f"experts.{expert_id}.{weight_name}.",
                 expert_id,
                 shard_id,
             )
             for expert_id in range(num_experts)
-            for shard_id, weight_name in [
-                ("w1", ckpt_gate_proj_name),
-                ("w2", ckpt_down_proj_name),
-                ("w3", ckpt_up_proj_name),
-            ]
+            for shard_id, weight_name in weight_mappings
         ]
 
     @classmethod
@@ -675,10 +681,13 @@ class FusedMoE(torch.nn.Module):
         cls,
         num_experts: int,
     ) -> List[Tuple[str, str, int, str]]:
+        # Precompute conditions for better performance
+        w13_shard_ids = {"w1", "w3"}
+
         # (param_name, weight_name, expert_id, shard_id)
         return [
             (
-                "experts.w13_" if shard_id in ["w1", "w3"] else "experts.w2_",
+                "experts.w13_" if shard_id in w13_shard_ids else "experts.w2_",
                 f"experts.{expert_id}.{shard_id}.",
                 expert_id,
                 shard_id,

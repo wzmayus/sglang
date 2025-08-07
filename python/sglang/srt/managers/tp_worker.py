@@ -288,6 +288,39 @@ class TpModelWorker:
         return success, message
 
     def update_weights_from_tensor(self, recv_req: UpdateWeightsFromTensorReqInput):
+        # Initialize profiling counter if not exists
+        if not hasattr(self, "_profile_count"):
+            self._profile_count = 0
+
+        # Only profile the first 3 calls
+        # should_profile = False
+        should_profile = self.tp_rank == 0 and self._profile_count < 3
+
+        if should_profile:
+            print(
+                f"[DEBUG] update_weights_from_tensor called #{self._profile_count + 1}, tp_rank={self.tp_rank}"
+            )
+            import os
+
+            profile_dir = "/workspace/slime/profile/sglang/"
+            os.makedirs(profile_dir, exist_ok=True)
+            print(f"[DEBUG] Profile directory created: {profile_dir}")
+
+            self.prof = torch.profiler.profile(
+                activities=[
+                    torch.profiler.ProfilerActivity.CPU,
+                    torch.profiler.ProfilerActivity.CUDA,
+                ],
+                schedule=torch.profiler.schedule(wait=0, warmup=0, active=1, repeat=1),
+                on_trace_ready=torch.profiler.tensorboard_trace_handler(
+                    os.path.join(profile_dir)
+                ),
+                record_shapes=True,
+                profile_memory=True,
+                with_stack=True,
+            )
+            self.prof.start()
+            print(f"[DEBUG] Profiler started")
 
         monkey_patch_torch_reductions()
         success, message = self.model_runner.update_weights_from_tensor(
@@ -296,6 +329,17 @@ class TpModelWorker:
             ),
             load_format=recv_req.load_format,
         )
+
+        if should_profile:
+            print(f"[DEBUG] Calling prof.step() for profile #{self._profile_count + 1}")
+            self.prof.step()
+            self.prof.stop()
+            print(f"[DEBUG] Profiler stopped and saved #{self._profile_count + 1}")
+            self._profile_count += 1
+        elif self.tp_rank == 0 and self._profile_count == 3:
+            print(f"[DEBUG] Profiling completed, skipping further profiling")
+            self._profile_count += 1  # Increment to avoid repeated messages
+
         return success, message
 
     def get_weights_by_name(self, recv_req: GetWeightsByNameReqInput):
