@@ -182,8 +182,9 @@ class GenerationBatchResult:
     bid: int
     can_run_cuda_graph: bool
     copy_done: torch.cuda.Event
-    spec_info: Optional[SpecInfo]
     accept_length: Optional[torch.Tensor]
+    new_seq_lens: Optional[torch.Tensor]
+    allocate_lens: Optional[torch.Tensor]
 
 
 @dataclass
@@ -1927,8 +1928,9 @@ class Scheduler(
                 bid=model_worker_batch.bid,
                 can_run_cuda_graph=forward_output.can_run_cuda_graph,
                 copy_done=copy_done,
-                spec_info=spec_info,
                 accept_length=forward_output.accept_length,
+                new_seq_lens=spec_info.new_seq_lens.clone(), # spec_info fields may be modified by next batch, so clone
+                allocate_lens=spec_info.allocate_lens.clone(),
             )
         else:  # embedding or reward model
             model_worker_batch = batch.get_model_worker_batch()

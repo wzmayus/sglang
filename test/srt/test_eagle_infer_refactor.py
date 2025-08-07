@@ -83,7 +83,9 @@ class TestEagleLargeBS(CustomTestCase):
                 "--speculative-num-draft-tokens",
                 "6",
                 "--max-running-requests",
-                "8",
+                "16",
+                "--cuda-graph-bs",
+                *[str(i) for i in range(1, 17)],
                 "--disable-overlap-schedule",
             ],
         )

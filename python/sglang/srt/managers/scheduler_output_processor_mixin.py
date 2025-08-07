@@ -272,7 +272,7 @@ class SchedulerOutputProcessorMixin:
             req.check_finished()
             if req.finished():
                 if not self.enable_overlap and batch.spec_algorithm.is_eagle() and self.page_size == 1:
-                    self.free_spec_dec_tokens_page_size_1(i, req, batch.spec_info, overlap=False)
+                    self.free_spec_dec_tokens_page_size_1(i, req, result.allocate_lens, result.new_seq_lens, overlap=False)
 
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
@@ -752,14 +752,14 @@ class SchedulerOutputProcessorMixin:
             )
         )
 
-    def free_spec_dec_tokens_page_size_1(self: Scheduler, batch_idx: int, req: Req, spec_info: "SpecInfo", overlap: bool):
+    def free_spec_dec_tokens_page_size_1(self: Scheduler, batch_idx: int, req: Req, allocate_lens: Optional[torch.Tensor], new_seq_lens: Optional[torch.Tensor], overlap: bool):
         # spec dec: free the extra allocated tokens
-        allocate_len = spec_info.allocate_lens[batch_idx]
+        allocate_len = allocate_lens[batch_idx]
         if overlap:
             # for overlap, the last iteration's allocation is always not used
             start_len = allocate_len - alloc_len_per_eagle_decode(self.draft_worker)
         else:
             # for non-overlap, the last iteration will accept some tokens
-            start_len = spec_info.new_seq_lens[batch_idx]
+            start_len = new_seq_lens[batch_idx]
         indices_to_free = self.req_to_token_pool.req_to_token[req.req_pool_idx][start_len:allocate_len]
         self.token_to_kv_pool_allocator.free(indices_to_free)
