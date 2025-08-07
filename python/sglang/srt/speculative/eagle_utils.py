@@ -704,7 +704,7 @@ def create_extend_after_decode_spec_info(
 @triton.jit
 def assign_req_to_token_pool(
     req_pool_indices,
-    req_to_token,
+    req_to_token, # mutable
     start_offset,
     end_offset,
     out_cache_loc,

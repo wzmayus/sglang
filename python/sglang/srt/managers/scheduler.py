@@ -823,13 +823,18 @@ class Scheduler(
         """A scheduler loop that overlaps the CPU processing and GPU computation."""
         self.result_queue = deque()
 
+        # while loop
         while True:
+            # recv requests from tokenizer/rpc
             recv_reqs = self.recv_requests()
+            # process input requests and append to corresponding queue
             self.process_input_requests(recv_reqs)
 
+            # get the next batch to run, and assing to cur_batch
             batch = self.get_next_batch_to_run()
             self.cur_batch = batch
 
+            # if there's cur_batch to run
             if batch:
                 batch.launch_done = threading.Event()
                 print(f"DEBUG: scheduler.event_loop_overlap -- running batch {batch.seq_lens=}")
@@ -846,6 +851,7 @@ class Scheduler(
                     )
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
 
+            # if there's last_batch to process
             if self.last_batch:
                 print(f"DEBUG: scheduler.event_loop_overlap -- processing last batch {self.last_batch.seq_lens=}")
                 # Process the results of the last batch
@@ -857,6 +863,7 @@ class Scheduler(
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
+            # if there's no last_batch to process and no cur_batch to run, the engine is idle
             elif batch is None:
                 # When the server is idle, do self-check and re-init some states
                 self.check_memory()
@@ -864,6 +871,7 @@ class Scheduler(
                 self.new_token_ratio = self.init_new_token_ratio
                 self.maybe_sleep_on_idle()
 
+            # update last_batch to be the cur_batch
             self.last_batch = batch
 
     @DynamicGradMode()
@@ -1609,6 +1617,7 @@ class Scheduler(
     def get_next_batch_to_run(self) -> Optional[ScheduleBatch]:
         # Merge the prefill batch into the running batch
         chunked_req_to_exclude = set()
+        # if chunked_req, ignore for now
         if self.chunked_req:
             # Move the chunked request out of the batch so that we can merge
             # only finished requests to running_batch.
@@ -1616,6 +1625,8 @@ class Scheduler(
             self.tree_cache.cache_unfinished_req(self.chunked_req)
             # chunked request keeps its rid but will get a new req_pool_idx
             self.req_to_token_pool.free(self.chunked_req.req_pool_idx)
+        
+        # if there's last_batch to process, and it is extend mode
         if self.last_batch and self.last_batch.forward_mode.is_extend():
             if self.last_batch.chunked_req is not None:
                 # In the context pipeline parallelism, after the last chunk, the current microbatch still track outdated chunked_req.
@@ -1624,23 +1635,30 @@ class Scheduler(
 
             # Filter batch
             last_bs = self.last_batch.batch_size()
+            # filter the last batch for finished requests
+            # ----------sync point---------- verify_done
             self.last_batch.filter_batch(
                 chunked_req_to_exclude=list(chunked_req_to_exclude)
             )
+            # if any request is filtered out, set batch_is_full to False
             if self.last_batch.batch_size() < last_bs:
                 self.running_batch.batch_is_full = False
 
             # Merge the new batch into the running batch
+            # if there's any request left in last_batch, merge it into running_batch because they are decode requests now
             if not self.last_batch.is_empty():
+                # if there's no running batch, set running_batch=last_batch
                 if self.running_batch.is_empty():
                     print(f"DEBUG: scheduler.get_next_batch_to_run -- self.running_batch.is_empty()")
                     self.running_batch = self.last_batch
                 else:
+                    # if there's running_batch, merge last_batch into running_batch
                     # Merge running_batch with prefill batch
                     print(f"DEBUG: scheduler.get_next_batch_to_run -- calling merge_batch, {self.running_batch.seq_lens=}")
                     self.running_batch.merge_batch(self.last_batch)
                     print(f"DEBUG: scheduler.get_next_batch_to_run -- after merge {self.running_batch.seq_lens=}")
 
+        # iterate through waiting queue and get a new prefill batch if any
         new_batch = self.get_new_batch_prefill()
 
         need_dp_attn_preparation = require_mlp_sync(self.server_args)
@@ -1651,11 +1669,14 @@ class Scheduler(
             new_batch = self.prepare_mlp_sync_batch(new_batch)
             need_dp_attn_preparation = new_batch is None
 
+        # run prefill first if any
         if new_batch is not None:
             # Run prefill first if possible
             ret = new_batch
+        # no prefill batch to run, run decode (i.e. running_batch)
         else:
             # Run decode
+            # if there's any request in running_batch, update it and return
             if not self.running_batch.is_empty():
                 print(f"DEBUG: scheduler.get_next_batch_to_run -- calling update_running_batch, {self.running_batch.seq_lens=}")
                 self.running_batch = self.update_running_batch(self.running_batch)
@@ -1833,14 +1854,19 @@ class Scheduler(
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:
         """Update the current running decoding batch."""
         print(f"DEBUG: scheduler.update_running_batch -- {batch.seq_lens=}")
+        # the bs before any filtering
         initial_bs = batch.batch_size()
 
-        batch.filter_batch()
+        # ----------sync point----------
+        # filter out finished requests. wait for verify_done
+        batch.filter_batch() 
+        # after filtering, if there's no req, return
         if batch.is_empty():
             batch.batch_is_full = False
             return batch
 
         # Check if decode out of memory
+        # skip retract logic, but keep an eye if any retraction happened.
         if not batch.check_decode_mem(self.decode_mem_cache_buf_multiplier) or (
             TEST_RETRACT and batch.batch_size() > 10
         ):
@@ -1863,12 +1889,15 @@ class Scheduler(
                 self.new_token_ratio - self.new_token_ratio_decay,
                 self.min_new_token_ratio,
             )
-
+        
+        # minor, ignore
         if batch.batch_size() < initial_bs:
             batch.batch_is_full = False
 
         # Update batch tensors
         print(f"DEBUG: scheduler.update_running_batch -- calling prepare_for_decode")
+        # after filtering, the remaining requests are decode requests that will be run in the next batch
+        # now we prepare the batch for the next decode forward.
         batch.prepare_for_decode()
         return batch
 
@@ -1894,8 +1923,11 @@ class Scheduler(
                     model_worker_batch.sampling_info.copy_for_forward()
                 )
 
+                scheduler_stream = torch.cuda.current_stream()
                 # Run forward in a separate stream to avoid blocking the main stream.
                 with self.forward_stream_ctx:
+                    # -------------- sync point needed? wait for scheduler_stream for assignments to finish --------------
+                    torch.cuda.current_stream().wait_stream(scheduler_stream)
                     forward_output = self.forward_worker.forward_batch_generation(
                         model_worker_batch
                     )

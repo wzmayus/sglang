@@ -1041,19 +1041,26 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         # We need this to get the correct self.seq_lens
         # TODO: is this missing overlapping opportunities? maybe we can do old self.seq_lens + 2x needed tokens?
+        # ---------sync point---------- verify_done, filter_batch and merge_batch are called before, so synced already
         if self.verify_done is not None:
             self.verify_done.synchronize()
             print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- verify_done synchronize")
         else:
             print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- verify_done is None")
         
+        # ------- need self.seq_lens to be synced, 
+        # ------- check exactly what's the last place that self.seq_lens is updated in both prefill and decode
         self.seq_lens_sum = self.seq_lens.sum().item()
         print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- {self.seq_lens=}")
         new_allocate_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
+        # have seen self.spec_info.allocate_lens is outdated before. pay attention.
         assert torch.all(new_allocate_lens >= self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
+        # if self.spec_info.allocate_lens is outdated, it's possible that we allocate less tokens than needed, so we free too much tokens.
+        # the issue is we free not enough tokens. If self.seq_lens is outdated, thus smaller, then new_allocate_lens is 
         num_needed_tokens = (
             (new_allocate_lens - self.spec_info.allocate_lens).sum().item()
         )
+        assert torch.all(new_allocate_lens > self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
         out_cache_loc = self.alloc_token_slots(num_needed_tokens)
 
         assign_req_to_token_pool[(bs,)](
@@ -1065,7 +1072,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             self.req_to_token_pool.req_to_token.shape[1],
             next_power_of_2(bs),
         )
+        # update the allocate_lens to the new_allocate_lens
         self.spec_info.allocate_lens = new_allocate_lens
+        # ---------- doe we need a sync point here? forward_stream wait for this update needed? ----------
+        torch.cuda.synchronize()
 
     def prepare_encoder_info_extend(self, input_ids: List[int], seq_lens: List[int]):
         self.encoder_lens_cpu = []
@@ -1542,6 +1552,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.forward_mode = ForwardMode.DECODE
         bs = len(self.reqs)
 
+        # allocate kv cache for eagle
         if self.spec_algorithm.is_eagle():
             self.allocate_for_eagle()
             return
@@ -1614,6 +1625,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         chunked_req_to_exclude: Optional[Union[Req, List[Req]]] = None,
         keep_indices: Optional[List[int]] = None,
     ):
+        # wait for verify_done from forward_stream
         if self.verify_done is not None:
             self.verify_done.wait()
 
