@@ -263,8 +263,6 @@ class EAGLEWorker(TpModelWorker):
             self.target_worker.model_runner.attn_backend.get_verify_buffers_to_fill_after_draft()
         )
 
-        print(f"EagleWorker.draft -- {draft_tokens=}") # this is a list of tensors, why?
-
         (
             tree_mask,
             position,

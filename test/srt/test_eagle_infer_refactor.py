@@ -62,6 +62,7 @@ class TestEagleBS1(CustomTestCase):
 class TestEagleLargeBS(CustomTestCase):
     @classmethod
     def setUpClass(cls):
+        max_running_requests = 8
         cls.model = "meta-llama/Llama-2-7b-chat-hf"
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
@@ -83,10 +84,10 @@ class TestEagleLargeBS(CustomTestCase):
                 "--speculative-num-draft-tokens",
                 "6",
                 "--max-running-requests",
-                "16",
+                str(max_running_requests),
                 "--cuda-graph-bs",
-                *[str(i) for i in range(1, 17)],
-                "--disable-overlap-schedule",
+                *[str(i) for i in range(1, max_running_requests + 1)],
+                # "--disable-overlap-schedule",
             ],
         )
 

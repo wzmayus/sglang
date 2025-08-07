@@ -481,6 +481,8 @@ class ServerArgs:
         if self.speculative_algorithm in ("EAGLE", "EAGLE3"):
             if self.max_running_requests is None:
                 self.max_running_requests = 48
+            else:
+                self.cuda_graph_bs = [i for i in range(1, self.max_running_requests + 1)]
             if self.enable_mixed_chunk:
                 self.enable_mixed_chunk = False
                 logger.warning(
