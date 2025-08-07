@@ -367,7 +367,9 @@ class EAGLEDraftCudaGraphRunner:
         out = self.output_buffers[self.bs]
 
         if self.bs != self.raw_bs:
+            print(f"EAGLEDraftCudaGraphRunner.replay -- {self.bs=} != {self.raw_bs=} before postprocess {out=}")
             out = self._postprocess_output_to_raw_bs(out, self.raw_bs)
+            print(f"EAGLEDraftCudaGraphRunner.replay -- {self.bs=} != {self.raw_bs=} after postprocess {out=}")
             forward_batch.batch_size = self.raw_bs
             forward_batch.positions = self.positions[: self.raw_num_token]
             forward_batch.seq_lens = self.seq_lens[: self.raw_bs]

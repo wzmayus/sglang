@@ -832,6 +832,7 @@ class Scheduler(
 
             if batch:
                 batch.launch_done = threading.Event()
+                print(f"DEBUG: scheduler.event_loop_overlap -- running batch {batch.seq_lens=}")
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -846,6 +847,7 @@ class Scheduler(
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
 
             if self.last_batch:
+                print(f"DEBUG: scheduler.event_loop_overlap -- processing last batch {self.last_batch.seq_lens=}")
                 # Process the results of the last batch
                 tmp_batch, tmp_result = self.result_queue.popleft()
                 tmp_batch.next_batch_sampling_info = (
@@ -1631,10 +1633,13 @@ class Scheduler(
             # Merge the new batch into the running batch
             if not self.last_batch.is_empty():
                 if self.running_batch.is_empty():
+                    print(f"DEBUG: scheduler.get_next_batch_to_run -- self.running_batch.is_empty()")
                     self.running_batch = self.last_batch
                 else:
                     # Merge running_batch with prefill batch
+                    print(f"DEBUG: scheduler.get_next_batch_to_run -- calling merge_batch, {self.running_batch.seq_lens=}")
                     self.running_batch.merge_batch(self.last_batch)
+                    print(f"DEBUG: scheduler.get_next_batch_to_run -- after merge {self.running_batch.seq_lens=}")
 
         new_batch = self.get_new_batch_prefill()
 
@@ -1652,7 +1657,9 @@ class Scheduler(
         else:
             # Run decode
             if not self.running_batch.is_empty():
+                print(f"DEBUG: scheduler.get_next_batch_to_run -- calling update_running_batch, {self.running_batch.seq_lens=}")
                 self.running_batch = self.update_running_batch(self.running_batch)
+                print(f"DEBUG: scheduler.get_next_batch_to_run -- after update_running_batch {self.running_batch.seq_lens=}")
                 ret = self.running_batch if not self.running_batch.is_empty() else None
             else:
                 ret = None
@@ -1825,6 +1832,7 @@ class Scheduler(
 
     def update_running_batch(self, batch: ScheduleBatch) -> Optional[ScheduleBatch]:
         """Update the current running decoding batch."""
+        print(f"DEBUG: scheduler.update_running_batch -- {batch.seq_lens=}")
         initial_bs = batch.batch_size()
 
         batch.filter_batch()
@@ -1860,6 +1868,7 @@ class Scheduler(
             batch.batch_is_full = False
 
         # Update batch tensors
+        print(f"DEBUG: scheduler.update_running_batch -- calling prepare_for_decode")
         batch.prepare_for_decode()
         return batch
 
@@ -1947,8 +1956,10 @@ class Scheduler(
         launch_done: Optional[threading.Event] = None,
     ):
         if batch.forward_mode.is_decode():
+            print(f"DEBUG: scheduler.process_batch_result -- decode, {batch.seq_lens=}")
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
+            print(f"DEBUG: scheduler.process_batch_result -- extend, {batch.seq_lens=}")
             self.process_batch_result_prefill(batch, result, launch_done)
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:

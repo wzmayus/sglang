@@ -270,6 +270,7 @@ class EagleVerifyInput:
 
         # Sample tokens
         if sampling_info.is_all_greedy:
+            print(f"DEBUG: EagleVerifyInput.sample -- is_all_greedy")
             target_predict = torch.argmax(next_token_logits, dim=-1)
             target_predict = target_predict.reshape(bs, self.num_draft_tokens)
 
@@ -284,6 +285,7 @@ class EagleVerifyInput:
                 target_predict=target_predict,
             )
         else:
+            print(f"DEBUG: EagleVerifyInput.sample -- not is_all_greedy, {sampling_info.temperatures=}")
             # Apply temperature and get target probs
             expanded_temperature = torch.repeat_interleave(
                 sampling_info.temperatures, self.num_draft_tokens, dim=0
@@ -316,6 +318,8 @@ class EagleVerifyInput:
             coins = all_coins[:-bs]
             # coins for final sampling
             coins_for_final_sampling = all_coins[-bs:]
+
+            print(f"DEBUG: EagleVerifyInput.sample -- uniform_samples={coins=}, {candidates=}")
 
             tree_speculative_sampling_target_only(
                 predicts=predict,  # mutable

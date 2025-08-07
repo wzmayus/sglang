@@ -1043,8 +1043,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # TODO: is this missing overlapping opportunities? maybe we can do old self.seq_lens + 2x needed tokens?
         if self.verify_done is not None:
             self.verify_done.synchronize()
+            print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- verify_done synchronize")
+        else:
+            print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- verify_done is None")
         
         self.seq_lens_sum = self.seq_lens.sum().item()
+        print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- {self.seq_lens=}")
         new_allocate_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
         assert torch.all(new_allocate_lens >= self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
         num_needed_tokens = (
@@ -1351,6 +1355,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         input_ids = torch.cat([self.input_ids, running_batch.input_ids])
         out_cache_loc = torch.cat([self.out_cache_loc, running_batch.out_cache_loc])
 
+        print(f"DEBUG: ScheduleBatch.mix_with_running -- calling merge_batch")
         self.merge_batch(running_batch)
         self.input_ids = input_ids
         self.out_cache_loc = out_cache_loc
@@ -1627,10 +1632,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if keep_indices is None or len(keep_indices) == 0:
             # Filter out all requests
             self.reqs = []
+            print(f"DEBUG: ScheduleBatch.filter_batch -- filter out all requests")
             return
 
         if len(keep_indices) == len(self.reqs):
             # No need to filter
+            print(f"DEBUG: ScheduleBatch.filter_batch -- no need to filter")
+            print(f"DEBUG: ScheduleBatch.filter_batch -- no filter {self.seq_lens=}")
             return
 
         keep_indices_device = torch.tensor(keep_indices, dtype=torch.int64).to(
@@ -1645,7 +1653,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if self.multimodal_inputs is not None:
             self.multimodal_inputs = [self.multimodal_inputs[i] for i in keep_indices]
         self.req_pool_indices = self.req_pool_indices[keep_indices_device]
+        print(f"DEBUG: ScheduleBatch.filter_batch -- before filter {self.seq_lens=}")
         self.seq_lens = self.seq_lens[keep_indices_device]
+        print(f"DEBUG: ScheduleBatch.filter_batch -- after filter {self.seq_lens=}, {keep_indices_device=}")
         self.out_cache_loc = None
         self.seq_lens_sum = self.seq_lens.sum().item()
         self.output_ids = self.output_ids[keep_indices_device]

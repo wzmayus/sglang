@@ -211,8 +211,10 @@ class SchedulerOutputProcessorMixin:
         if copy_done is not None:
             ctx = torch.cuda.stream(self.copy_stream)
             copy_done.synchronize()
+            print(f"DEBUG: scheduler_output_processor_mixin.process_batch_result_decode -- copy_done.synchronize()")
         else:
             ctx = empty_context()
+            print(f"DEBUG: scheduler_output_processor_mixin.process_batch_result_decode -- empty_context()")
 
         with ctx:
             next_token_ids = next_token_ids.tolist()
@@ -248,7 +250,7 @@ class SchedulerOutputProcessorMixin:
             if self.enable_overlap and req.finished():
                 if self.page_size == 1:
                     if batch.spec_algorithm.is_eagle():
-                        self.free_spec_dec_tokens_page_size_1(i, req, result.spec_info, overlap=True)
+                        self.free_spec_dec_tokens_page_size_1(i, req, result.allocate_lens, None, overlap=True)
                     else:
                         # not spec dec: free the one extra delayed token
                         self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
