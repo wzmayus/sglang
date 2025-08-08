@@ -764,4 +764,5 @@ class SchedulerOutputProcessorMixin:
             # for non-overlap, the last iteration will accept some tokens
             start_len = new_seq_lens[batch_idx]
         indices_to_free = self.req_to_token_pool.req_to_token[req.req_pool_idx][start_len:allocate_len]
+        print(f"DEBUG: free_spec_dec_tokens_page_size_1: {indices_to_free=}, {allocate_len=}, count={len(indices_to_free)}")
         self.token_to_kv_pool_allocator.free(indices_to_free)

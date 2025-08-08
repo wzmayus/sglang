@@ -1530,6 +1530,14 @@ class Scheduler(
             token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
 
         if memory_leak:
+            # find the missing kv indices
+            # uncomment these will cause not able to repro....
+            # total_kv_indices = set(range(1, self.max_total_num_tokens+1))
+            # evictable_kv_indices = set(self.tree_cache.evictable_kv_indices())
+            # available_kv_indices = set(self.token_to_kv_pool_allocator.free_pages)
+            # missing_kv_indices = total_kv_indices - evictable_kv_indices - available_kv_indices
+            # print(f"RadixCache: missing_kv_indices: {len(missing_kv_indices)=}, {missing_kv_indices=}, {token_msg}")
+            # print(f"check_memory: {total_kv_indices=}, {available_kv_indices=}")
             msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
             raise ValueError(msg)
 

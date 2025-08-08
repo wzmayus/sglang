@@ -1062,6 +1062,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         )
         assert torch.all(new_allocate_lens > self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
         out_cache_loc = self.alloc_token_slots(num_needed_tokens)
+        print(f"DEBUG: ScheduleBatch.allocate_for_eagle -- {new_allocate_lens=}, needed_tokens={new_allocate_lens - self.spec_info.allocate_lens}, {out_cache_loc=}")
 
         assign_req_to_token_pool[(bs,)](
             self.req_pool_indices,

@@ -220,6 +220,8 @@ class RadixCache(BasePrefixCache):
             req.req_pool_idx, : len(token_ids)
         ]
 
+        print(f"RadixCache: cache_finished_req: {len(token_ids)=}, {len(kv_indices)=}, {kv_indices[-10:]=}")
+
         if self.page_size != 1:
             page_aligned_len = len(kv_indices) // self.page_size * self.page_size
             page_aligned_kv_indices = kv_indices[:page_aligned_len].to(
@@ -552,6 +554,16 @@ class RadixCache(BasePrefixCache):
         events = self.kv_event_queue
         self.kv_event_queue = []
         return events
+    
+    def evictable_kv_indices(self):
+        """iterate over the radix tree and collect all values"""
+        ret_list = []
+        stack = [self.root_node]
+        while stack:
+            cur_node = stack.pop()
+            ret_list.extend(cur_node.value)
+            stack.extend(cur_node.children.values())
+        return ret_list
 
 
 if __name__ == "__main__":

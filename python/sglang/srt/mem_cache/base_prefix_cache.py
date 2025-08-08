@@ -107,3 +107,7 @@ class BasePrefixCache(ABC):
 
     def take_events(self):
         return []
+
+    def evictable_kv_indices(self):
+        """Return a list of evictable KV indices. Default implementation returns empty list."""
+        return []
