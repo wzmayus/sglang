@@ -1512,12 +1512,24 @@ class Scheduler(
         else:
             _, _, available_size, evictable_size = self._get_token_info()
             protected_size = self.tree_cache.protected_size()
+
+            total_kv_indices = set(range(1, self.max_total_num_tokens + 1))
+            evictable_kv_indices = set(self.tree_cache.evictable_kv_indices())
+            available_kv_indices = set(self.token_to_kv_pool_allocator.free_pages.tolist())
+
+            kv_indices_leak = total_kv_indices != (evictable_kv_indices | available_kv_indices)
+            missing_kv_indices = total_kv_indices - (evictable_kv_indices | available_kv_indices)
+
             memory_leak = (available_size + evictable_size) != (
                 self.max_total_num_tokens
                 if not self.enable_hierarchical_cache
                 else self.max_total_num_tokens - protected_size
+            ) or kv_indices_leak
+            token_msg = (
+                f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}, {kv_indices_leak=}\n"
             )
-            token_msg = f"{self.max_total_num_tokens=}, {available_size=}, {evictable_size=}, {protected_size=}\n"
+            if kv_indices_leak:
+                token_msg += f"{len(total_kv_indices)=}, {len(evictable_kv_indices)=}, {len(available_kv_indices)=}, {len(missing_kv_indices)=}, {total_kv_indices=}, {evictable_kv_indices=}, {available_kv_indices=}, {missing_kv_indices=}\n"
 
         if memory_leak:
             msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"

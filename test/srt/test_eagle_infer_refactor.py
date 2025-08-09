@@ -47,7 +47,7 @@ class TestEagleBS1(CustomTestCase):
         args = SimpleNamespace(
             num_shots=5,
             data_path=None,
-            num_questions=60,
+            num_questions=1000000,
             max_new_tokens=512,
             parallel=128,
             host="http://127.0.0.1",
@@ -62,7 +62,7 @@ class TestEagleBS1(CustomTestCase):
 class TestEagleLargeBS(CustomTestCase):
     @classmethod
     def setUpClass(cls):
-        max_running_requests = 16
+        max_running_requests = 64
         cls.model = "meta-llama/Llama-2-7b-chat-hf"
         cls.base_url = DEFAULT_URL_FOR_TEST
         cls.process = popen_launch_server(
@@ -83,6 +83,8 @@ class TestEagleLargeBS(CustomTestCase):
                 "1",
                 "--speculative-num-draft-tokens",
                 "6",
+                "--mem-fraction-static",
+                "0.75",
                 "--max-running-requests",
                 str(max_running_requests),
                 "--cuda-graph-bs",
@@ -98,7 +100,7 @@ class TestEagleLargeBS(CustomTestCase):
         args = SimpleNamespace(
             num_shots=5,
             data_path=None,
-            num_questions=100,
+            num_questions=1000000,
             max_new_tokens=512,
             parallel=128,
             host="http://127.0.0.1",
