@@ -1046,7 +1046,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         
         self.seq_lens_sum = self.seq_lens.sum().item()
         new_allocate_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
-        assert torch.all(new_allocate_lens >= self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
+        assert torch.all(new_allocate_lens > self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
         num_needed_tokens = (
             (new_allocate_lens - self.spec_info.allocate_lens).sum().item()
         )

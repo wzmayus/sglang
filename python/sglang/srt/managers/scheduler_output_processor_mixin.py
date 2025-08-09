@@ -248,7 +248,7 @@ class SchedulerOutputProcessorMixin:
             if self.enable_overlap and req.finished():
                 if self.page_size == 1:
                     if batch.spec_algorithm.is_eagle():
-                        self.free_spec_dec_tokens_page_size_1(i, req, result.spec_info, overlap=True)
+                        self.free_spec_dec_tokens_page_size_1(i, req, result.allocate_lens, None, overlap=True)
                     else:
                         # not spec dec: free the one extra delayed token
                         self.token_to_kv_pool_allocator.free(batch.out_cache_loc[i : i + 1])
@@ -273,6 +273,10 @@ class SchedulerOutputProcessorMixin:
             if req.finished():
                 if not self.enable_overlap and batch.spec_algorithm.is_eagle() and self.page_size == 1:
                     self.free_spec_dec_tokens_page_size_1(i, req, result.allocate_lens, result.new_seq_lens, overlap=False)
+                
+                # tmp fix but ugly
+                if self.cur_batch.forward_mode.is_extend() and self.enable_overlap and batch.spec_algorithm.is_eagle() and self.page_size == 1:
+                    self.free_spec_dec_tokens_page_size_1(i, req, result.allocate_lens, result.new_seq_lens, overlap=True)
 
                 self.tree_cache.cache_finished_req(req)
                 req.time_stats.completion_time = time.time()
@@ -755,8 +759,8 @@ class SchedulerOutputProcessorMixin:
     def free_spec_dec_tokens_page_size_1(self: Scheduler, batch_idx: int, req: Req, allocate_lens: Optional[torch.Tensor], new_seq_lens: Optional[torch.Tensor], overlap: bool):
         # spec dec: free the extra allocated tokens
         allocate_len = allocate_lens[batch_idx]
-        if overlap:
-            # for overlap, the last iteration's allocation is always not used
+        if new_seq_lens is None:
+            # for overlap, the last iteration's allocation is not used. It's not true if the cur batch is extend.
             start_len = allocate_len - alloc_len_per_eagle_decode(self.draft_worker)
         else:
             # for non-overlap, the last iteration will accept some tokens
