@@ -837,7 +837,7 @@ class Scheduler(
             # if there's cur_batch to run
             if batch:
                 batch.launch_done = threading.Event()
-                print(f"DEBUG: scheduler.event_loop_overlap -- running batch {batch.seq_lens=}")
+                print(f"DEBUG: scheduler.event_loop_overlap -- after get_next_batch_to_run batch {batch.seq_lens=}")
                 result = self.run_batch(batch)
                 self.result_queue.append((batch.copy(), result))
 
@@ -1680,6 +1680,7 @@ class Scheduler(
         # run prefill first if any
         if new_batch is not None:
             # Run prefill first if possible
+            print(f"DEBUG: scheduler.get_next_batch_to_run -- running new prefill batch {new_batch.seq_lens=}")
             ret = new_batch
         # no prefill batch to run, run decode (i.e. running_batch)
         else:
