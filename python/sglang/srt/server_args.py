@@ -25,7 +25,7 @@ from typing import List, Literal, Optional, Union
 
 from sglang.srt.hf_transformers_utils import check_gguf_file, get_config
 from sglang.srt.layers.utils import is_sm100_supported
-from sglang.srt.lora.lora_registry import LoRARef
+from sglang.srt.lora.lora_ref import LoRARef
 from sglang.srt.reasoning_parser import ReasoningParser
 from sglang.srt.utils import (
     LORA_TARGET_ALL_MODULES,

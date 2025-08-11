@@ -64,7 +64,8 @@ from sglang.srt.hf_transformers_utils import (
     get_tokenizer,
     get_tokenizer_from_processor,
 )
-from sglang.srt.lora.lora_registry import LoRARef, LoRARegistry
+from sglang.srt.lora.lora_ref import LoRARef
+from sglang.srt.lora.lora_registry import LoRARegistry
 from sglang.srt.managers.io_struct import (
     AbortReq,
     BatchEmbeddingOut,
@@ -485,7 +486,7 @@ class TokenizerManager:
                 f"Receive: obj={dataclass_to_string_truncated(obj, max_length, skip_names=skip_names)}"
             )
 
-        async with self.model_update_lock.reader_lock:
+        async with self.model_update_lock.reader_lock, self.lora_registry.lease(obj):
             if obj.is_single:
                 tokenized_obj = await self._tokenize_one_request(obj)
                 state = self._send_one_request(obj, tokenized_obj, created_time)
@@ -552,11 +553,6 @@ class TokenizerManager:
                 input_ids = mm_inputs["input_ids"]
         else:
             mm_inputs = None
-
-        if self.server_args.enable_lora and obj.lora_path:
-            # Start tracking ongoing requests for LoRA adapters and replace the user-friendly LoRA names in
-            # `lora_path` with their corresponding unique LoRA IDs, as required for internal processing.
-            obj.lora_id = await self.lora_registry.acquire(obj.lora_path)
 
         self._validate_one_request(obj, input_ids)
         return self._create_tokenized_object(
@@ -774,10 +770,6 @@ class TokenizerManager:
                     else:
                         msg = f"Finish: obj={dataclass_to_string_truncated(obj, max_length, skip_names=skip_names)}, out={dataclass_to_string_truncated(out, max_length, skip_names=out_skip_names)}"
                     logger.info(msg)
-
-                # Mark ongoing LoRA request as finished.
-                if self.server_args.enable_lora and obj.lora_path:
-                    await self.lora_registry.release(obj.lora_id)
 
                 # Check if this was an abort/error created by scheduler
                 if isinstance(out["meta_info"].get("finish_reason"), dict):

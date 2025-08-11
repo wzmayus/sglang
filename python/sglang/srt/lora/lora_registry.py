@@ -14,41 +14,13 @@
 
 
 import asyncio
-from collections import defaultdict
-from dataclasses import dataclass, field, fields
+from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Union
-from uuid import uuid4
 
 from sglang.srt.aio_rwlock import RWLock
+from sglang.srt.lora.lora_ref import LoRARef
+from sglang.srt.managers.io_struct import GenerateReqInput
 from sglang.srt.utils import ConcurrentCounter
-
-
-@dataclass(frozen=True)
-class LoRARef:
-    """
-    Reference record for a LoRA model.
-
-    This object guarantees a unique ``lora_id`` and may include ``lora_name``, ``lora_path``, and ``pinned``.
-    The ID eliminates conflicts from reused LoRA names or paths and can be used to generate deterministic cache
-    keys (e.g., radix cache).
-    """
-
-    lora_id: str = field(default_factory=lambda: uuid4().hex)
-    lora_name: Optional[str] = None
-    lora_path: Optional[str] = None
-    pinned: Optional[bool] = None
-
-    def __post_init__(self):
-        if self.lora_id is None:
-            raise ValueError("lora_id cannot be None")
-
-    def __str__(self) -> str:
-        parts = [
-            f"{f.name}={value}"
-            for f in fields(self)
-            if (value := getattr(self, f.name)) is not None
-        ]
-        return f"{self.__class__.__name__}({', '.join(parts)})"
 
 
 class LoRARegistry:
@@ -106,11 +78,26 @@ class LoRARegistry:
                     f"LoRA with name {lora_name} does not exist. Loaded LoRAs: {self._registry.keys()}"
                 )
             del self._registry[lora_name]
-            del self._counters[lora_ref.lora_id]
 
         return lora_ref.lora_id
 
-    async def acquire(self, lora_name: Union[str, List[str]]) -> Union[str, List[str]]:
+    @asynccontextmanager
+    async def lease(self, req: GenerateReqInput):
+        """
+        A context manager to manage the lifecycle of a LoRA adapter usage for a given request.
+
+        This method ensures that a LoRA adapter would not be unloaded while it is being used by an ongoing
+        request, enabling concurrent adapter updates and inference.
+        """
+        if req.lora_path is not None:
+            req.lora_id = await self._acquire(req.lora_path)
+        try:
+            yield
+        finally:
+            if req.lora_path is not None:
+                await self._release(req.lora_id)
+
+    async def _acquire(self, lora_name: Union[str, List[str]]) -> Union[str, List[str]]:
         """
         Queries registry for LoRA IDs based on LoRA names and start tracking the usage of the corresponding LoRA adapters
         by incrementing its counter.
@@ -143,7 +130,7 @@ class LoRARegistry:
                     "lora_name must be either a string or a list of strings."
                 )
 
-    async def release(self, lora_id: Union[str, List[str]]):
+    async def _release(self, lora_id: Union[str, List[str]]):
         """
         Decrements the usage counter for a LoRA adapter, indicating that it is no longer in use.
         """
@@ -169,11 +156,13 @@ class LoRARegistry:
         assert (
             lora_id not in self._registry
         ), "wait_for_unload should only be called after the LoRA adapter has been unregistered. "
-        counter = self._counters.get(lora_id)
-        if counter:
-            # Wait until no requests are using this LoRA adapter.
-            await counter.wait_for_zero()
-            del self._counters[lora_id]
+        assert (
+            lora_id in self._counters
+        ), "The LoRA ID should still have a counter if it has been registered before."
+
+        # Wait until no requests are using this LoRA adapter.
+        await self._counters[lora_id].wait_for_zero()
+        del self._counters[lora_id]
 
     def _register_adapter(self, lora_ref: LoRARef):
         """
