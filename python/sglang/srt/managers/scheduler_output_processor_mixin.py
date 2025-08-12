@@ -214,6 +214,9 @@ class SchedulerOutputProcessorMixin:
         else:
             ctx = empty_context()
 
+        print(f"process_batch_result_decode - result.new_seq_lens address {id(result.new_seq_lens)}")
+        print(f"process_batch_result_decode - batch.seq_lens address {id(batch.seq_lens)}")
+
         with ctx:
             next_token_ids = next_token_ids.tolist()
             if batch.return_logprob:

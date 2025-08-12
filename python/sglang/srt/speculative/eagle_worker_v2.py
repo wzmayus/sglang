@@ -217,14 +217,17 @@ class EAGLEWorker(TpModelWorker):
             batch_output: The results in a tuple
         """
         if batch.forward_mode.is_decode():
+            print(f"forward_batch_generation - decode")
             old_spec_info = batch.spec_info
             spec_info = self.draft(batch)
             batch_output = self.verify(batch, spec_info, old_spec_info)
             return batch_output
         else:
+            print(f"forward_batch_generation - prefill")
             # Target prefill
             batch.capture_hidden_mode = CaptureHiddenMode.FULL
             batch_output = self.target_worker.forward_batch_generation(batch)
+            print(f"forward_batch_generation - target prefill done")
 
             # Draft prefill
             batch.capture_hidden_mode = CaptureHiddenMode.LAST
@@ -233,6 +236,7 @@ class EAGLEWorker(TpModelWorker):
                 batch_output.logits_output.hidden_states,
                 batch_output.next_token_ids,
             )
+            print(f"forward_batch_generation - draft prefill done")
             return batch_output
 
     def draft(self, batch: ModelWorkerBatch):
@@ -380,6 +384,7 @@ class EAGLEWorker(TpModelWorker):
     ):
         # Parse args
         seq_lens_backup = batch.seq_lens
+        print(f"verify - batch.seq_lens address {id(batch.seq_lens)}, seq_lens_backup address {id(seq_lens_backup)}")
         bs = len(batch.seq_lens)
 
         # Batch 1: Target verify
@@ -420,11 +425,14 @@ class EAGLEWorker(TpModelWorker):
             accept_index,
         ) = spec_info.sample(batch, logits_output)
         new_seq_lens = seq_lens_backup + accept_length
+        print(f"verify - new_seq_lens address after sample {id(new_seq_lens)}, seq_lens_backup address {id(seq_lens_backup)}, accept_length address {id(accept_length)}")
         verify_done = torch.cuda.Event()
         verify_done.record()
 
         # Move the accepted tokens to the target KV cache locations
+        print(f"verify - batch.seq_lens address before assigning seq_lens_backup {id(batch.seq_lens)}")
         batch.seq_lens = seq_lens_backup
+        print(f"verify - batch.seq_lens address after assigning seq_lens_backup {id(batch.seq_lens)}")
         self.move_accepted_tokens_to_target_kvcache(
             batch,
             accept_index,
@@ -487,6 +495,8 @@ class EAGLEWorker(TpModelWorker):
             new_seq_lens=new_seq_lens,
             allocate_lens=old_spec_info.allocate_lens,
             verify_done=verify_done,
+            seq_lens_backup_debug=seq_lens_backup,
+            # accept_length_debug=accept_length,
         )
 
         return ForwardBatchOutput(
@@ -524,8 +534,8 @@ class EAGLEWorker(TpModelWorker):
         draft_input = EagleDraftInput(
             hidden_states=target_hidden_states,
             verified_id=next_token_ids,
-            new_seq_lens=batch.seq_lens,
-            allocate_lens=batch.seq_lens,
+            new_seq_lens=batch.seq_lens.clone(),
+            allocate_lens=batch.seq_lens.clone(),
         )
         batch.spec_info = draft_input
 

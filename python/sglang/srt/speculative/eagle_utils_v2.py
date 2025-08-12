@@ -65,6 +65,10 @@ class EagleDraftInput:
     new_seq_lens: torch.Tensor = None
     verify_done: torch.cuda.Event = None
 
+    # Debug
+    seq_lens_backup_debug: torch.Tensor = None
+    accept_length_debug: torch.Tensor = None
+
     def filter_batch(self, new_indices: torch.Tensor):
         self.topk_p = self.topk_p[new_indices]
         self.topk_index = self.topk_index[new_indices]
@@ -131,7 +135,9 @@ class EagleDraftInput:
 
         batch.spec_info = self
         batch.input_ids = predict
+        print(f"prepare_for_extend_to_fill_draft_kvcache - batch.seq_lens address before adding num_draft_tokens {id(batch.seq_lens)}")
         batch.seq_lens = batch.seq_lens + num_draft_tokens
+        print(f"prepare_for_extend_to_fill_draft_kvcache - batch.seq_lens address after adding num_draft_tokens {id(batch.seq_lens)}")
         batch.seq_lens_cpu = batch.seq_lens_cpu + num_draft_tokens
         batch.seq_lens_sum += extend_num_tokens
         batch.extend_seq_lens = torch.full_like(batch.seq_lens, num_draft_tokens)

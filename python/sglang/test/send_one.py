@@ -59,6 +59,7 @@ class BenchArgs:
 
 
 def send_one_prompt(args):
+    prompt_append = "make it as concise as possible." * 5
     if args.image:
         args.prompt = (
             "Human: Describe this image in a very short sentence.\n\nAssistant:"
@@ -91,6 +92,7 @@ def send_one_prompt(args):
         json_schema = None
 
     if args.batch_size > 1:
+        # prompt = [prompt + prompt_append * i for i in range(args.batch_size)]
         prompt = [prompt] * args.batch_size
 
     json_data = {

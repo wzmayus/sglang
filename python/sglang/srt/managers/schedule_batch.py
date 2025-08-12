@@ -1044,10 +1044,12 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if self.verify_done is not None:
             self.verify_done.synchronize()
         
+        print(f"allocate_for_eagle - {self.seq_lens=}, self.seq_lens address {id(self.seq_lens)}, self.spec_info.seq_lens_backup_debug={self.spec_info.seq_lens_backup_debug if self.spec_info else None}, seq_lens_backup_debug address {id(self.spec_info.seq_lens_backup_debug) if self.spec_info else None}, self.spec_info.accept_length_debug={self.spec_info.accept_length_debug if self.spec_info else None}, accept_length_debug address {id(self.spec_info.accept_length_debug) if self.spec_info else None}")
         self.seq_lens_sum = self.seq_lens.sum().item()
         new_allocate_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
-        assert torch.all(new_allocate_lens > self.spec_info.allocate_lens), f"new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
-        assert torch.all(self.seq_lens <= self.spec_info.allocate_lens), f"self.seq_lens={self.seq_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
+        assert torch.all(new_allocate_lens > self.spec_info.allocate_lens), f"self.seq_lens={self.seq_lens}, {id(self.seq_lens)=}, new_allocate_lens={new_allocate_lens}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
+        assert torch.all(self.seq_lens <= self.spec_info.allocate_lens), f"self.seq_lens={self.seq_lens}, {id(self.seq_lens)=}, self.spec_info.allocate_lens={self.spec_info.allocate_lens}"
+        print(f"allocate_for_eagle begin - {self.seq_lens=}, {id(self.seq_lens)=}, {self.spec_info.allocate_lens=}, {new_allocate_lens=}")
         num_needed_tokens = (
             (new_allocate_lens - self.spec_info.allocate_lens).sum().item()
         )
@@ -1612,6 +1614,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     ):
         if self.verify_done is not None:
             self.verify_done.synchronize()
+        
+        print(f"filter_batch begin - {self.seq_lens=}, address {id(self.seq_lens)}")
 
         if keep_indices is None:
             if isinstance(chunked_req_to_exclude, Req):
@@ -1628,10 +1632,13 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if keep_indices is None or len(keep_indices) == 0:
             # Filter out all requests
             self.reqs = []
+            self.seq_lens = torch.empty(0, dtype=torch.int64, device=self.device)
+            print(f"filter_batch - filter out all requests - {self.seq_lens=}, seq_lens address {id(self.seq_lens)}")
             return
 
         if len(keep_indices) == len(self.reqs):
             # No need to filter
+            print(f"filter_batch - no need to filter - {self.seq_lens=}, seq_lens address {id(self.seq_lens)}")
             return
 
         keep_indices_device = torch.tensor(keep_indices, dtype=torch.int64).to(
@@ -1664,6 +1671,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         self.sampling_info.filter_batch(keep_indices, keep_indices_device)
         if self.spec_info:
             self.spec_info.filter_batch(keep_indices_device)
+        
+        print(f"filter_batch end - {self.seq_lens=}, seq_lens address {id(self.seq_lens)}")
 
     def merge_batch(self, other: "ScheduleBatch"):
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
@@ -1673,6 +1682,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         #     self.verify_done.wait()
         # if other.verify_done is not None:
         #     other.verify_done.wait()
+        print(f"merge_batch begin - {self.seq_lens=}, self.seq_lens address {id(self.seq_lens)}, {other.seq_lens=}, other.seq_lens address {id(other.seq_lens)}")
 
         self.sampling_info.merge_batch(other.sampling_info)
 
@@ -1708,6 +1718,18 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
         if self.spec_info:
             self.spec_info.merge_batch(other.spec_info)
+        
+        # TODO: determine if useful
+        if self.input_ids is not None:
+            self.input_ids = torch.cat([self.input_ids, other.input_ids])
+        if self.prefix_lens is not None:
+            self.prefix_lens.extend(other.prefix_lens)
+        if self.extend_lens is not None:
+            self.extend_lens.extend(other.extend_lens)
+        if self.extend_logprob_start_lens is not None:
+            self.extend_logprob_start_lens.extend(other.extend_logprob_start_lens)
+
+        print(f"merge_batch end - {self.seq_lens=}")
 
     def get_model_worker_batch(
         self, seq_lens_cpu_cache: Optional[torch.Tensor] = None
@@ -1786,7 +1808,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             global_num_tokens_for_logprob=self.global_num_tokens_for_logprob,
             can_run_dp_cuda_graph=self.can_run_dp_cuda_graph,
             is_extend_in_batch=self.is_extend_in_batch,
-            seq_lens=self.seq_lens, # not sure if needed
+            # seq_lens=self.seq_lens, # not sure if needed
         )
 
     def _evict_tree_cache_if_needed(

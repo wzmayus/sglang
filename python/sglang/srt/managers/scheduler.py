@@ -182,6 +182,7 @@ class GenerationBatchResult:
     bid: int
     can_run_cuda_graph: bool
     copy_done: torch.cuda.Event
+    verify_done: Optional[torch.cuda.Event]
     accept_length: Optional[torch.Tensor]
     new_seq_lens: Optional[torch.Tensor]
     allocate_lens: Optional[torch.Tensor]
@@ -832,7 +833,9 @@ class Scheduler(
 
             if batch:
                 batch.launch_done = threading.Event()
+                print(f"event_loop_overlap: run batch: {batch.seq_lens=}")
                 result = self.run_batch(batch)
+                print(f"event_loop_overlap: run batch done")
                 self.result_queue.append((batch.copy(), result))
 
                 if self.last_batch is None:
@@ -844,6 +847,25 @@ class Scheduler(
                         next_batch_sampling_info=self.cur_sampling_info,
                     )
                     self.process_batch_result(tmp_batch, None, batch.launch_done)
+            
+            sync_before_last_batch = False
+            if batch:
+                # seq_len
+                # allocate_lens
+                # output_ids
+                sync_before_last_batch = True
+                # torch.cuda.synchronize() # useful
+                # print(f"event_loop_overlap - before process last_batch torch.cuda.synchronize()")
+                # if result.copy_done is not None:
+                #     result.copy_done.synchronize()
+                #     print(f"event_loop_overlap - result.copy_done synchronized before process last_batch")
+                if self.result_queue:
+                    tmp_batch = self.result_queue[-1][0]
+                else:
+                    tmp_batch = None
+                print(f"event_loop_overlap - before process last_batch result {batch.seq_lens=}, address {id(batch.seq_lens)}, tmp_batch.seq_lens={tmp_batch.seq_lens if tmp_batch else None}, address {id(tmp_batch.seq_lens) if tmp_batch else None}")
+                # print(f"event_loop_overlap - batch: {batch=}")
+                # print(f"event_loop_overlap - result: {result=}")
 
             if self.last_batch:
                 # Process the results of the last batch
@@ -852,6 +874,10 @@ class Scheduler(
                     self.cur_sampling_info if batch else None
                 )
                 # NOTE: we should use current launched batch's launch_done event Instead of the last batch's
+                
+                # if sync_before_last_batch:
+                #     print(f"event_loop_overlap - tmp_batch: {tmp_batch=}")
+                #     print(f"event_loop_overlap - tmp_result: {tmp_result=}")
                 self.process_batch_result(
                     tmp_batch, tmp_result, batch.launch_done if batch else None
                 )
@@ -862,7 +888,17 @@ class Scheduler(
                 self.new_token_ratio = self.init_new_token_ratio
                 self.maybe_sleep_on_idle()
 
+            # if batch is not None:
+            #     torch.cuda.synchronize() # not useful
+            #     print(f"event_loop_overlap - setting last_batch to cur_batch {batch.seq_lens=}")
+            #     print(f"event_loop_overlap - batch: {batch=}")
+            #     print(f"event_loop_overlap - result: {result=}")
+            #     if self.last_batch:
+            #         print(f"event_loop_overlap - tmp_batch: {tmp_batch=}")
+            #         print(f"event_loop_overlap - tmp_result: {tmp_result=}")
             self.last_batch = batch
+            if self.last_batch:
+                print(f"event_loop_overlap - after setting last_batch to batch: seq_lens address {id(self.last_batch.seq_lens)}")
 
     @DynamicGradMode()
     def event_loop_pp(self):
@@ -1634,6 +1670,7 @@ class Scheduler(
 
             # Filter batch
             last_bs = self.last_batch.batch_size()
+            print(f"get_next_batch_to_run - last_batch filter_batch: {self.last_batch.seq_lens=}")
             self.last_batch.filter_batch(
                 chunked_req_to_exclude=list(chunked_req_to_exclude)
             )
@@ -1642,11 +1679,15 @@ class Scheduler(
 
             # Merge the new batch into the running batch
             if not self.last_batch.is_empty():
+                print(f"get_next_batch_to_run - last_batch is not empty {self.last_batch.seq_lens=}")
                 if self.running_batch.is_empty():
+                    print(f"get_next_batch_to_run - running_batch is empty")
                     self.running_batch = self.last_batch
                 else:
                     # Merge running_batch with prefill batch
+                    print(f"get_next_batch_to_run - merge running_batch with last batch {self.running_batch.seq_lens=}, {self.last_batch.seq_lens=}")
                     self.running_batch.merge_batch(self.last_batch)
+                    print(f"get_next_batch_to_run - after merge running_batch with last batch: {self.running_batch.seq_lens=}, running_batch.seq_lens address {id(self.running_batch.seq_lens)}")
 
         new_batch = self.get_new_batch_prefill()
 
@@ -1660,10 +1701,12 @@ class Scheduler(
 
         if new_batch is not None:
             # Run prefill first if possible
+            print(f"get_next_batch_to_run - prefill batch")
             ret = new_batch
         else:
             # Run decode
             if not self.running_batch.is_empty():
+                print(f"get_next_batch_to_run - decode batch")
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
             else:
@@ -1728,7 +1771,10 @@ class Scheduler(
             lora_set = set([req.lora_path for req in self.running_batch.reqs])
 
         # Get requests from the waiting queue to a new prefill batch
+        req_added = 0
         for req in self.waiting_queue:
+            if req_added >= 2:
+                break
             if (
                 self.lora_paths
                 and len(
@@ -1757,6 +1803,7 @@ class Scheduler(
 
             req.init_next_round_input(self.tree_cache)
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
+            req_added += 1
 
             if res != AddReqResult.CONTINUE:
                 if res == AddReqResult.NO_TOKEN:
@@ -1902,6 +1949,11 @@ class Scheduler(
                     forward_output = self.forward_worker.forward_batch_generation(
                         model_worker_batch
                     )
+                    # forward_output = make_clone(forward_output) # TODO:
+                    # print(f"run_batch - forward_output.spec_info.new_seq_lens address before clone {id(forward_output.spec_info.new_seq_lens)}")
+                    # forward_output.spec_info.new_seq_lens = forward_output.spec_info.new_seq_lens.clone()
+                    # print(f"run_batch - forward_output.spec_info.new_seq_lens address after clone {id(forward_output.spec_info.new_seq_lens)}")
+                    print(f"run_batch - forward_output.spec_info.new_seq_lens address {id(forward_output.spec_info.new_seq_lens)}")
                     copy_done = torch.cuda.Event()
                     copy_done.record()
             else:
@@ -1914,8 +1966,12 @@ class Scheduler(
             # Handle speculative decoding output
             if forward_output.spec_info is not None:
                 spec_info = batch.spec_info = forward_output.spec_info
+                print(f"run_batch - batch.seq_lens address before assign to new_seq_lens {id(batch.seq_lens)}")
                 batch.seq_lens = spec_info.new_seq_lens
+                print(f"run_batch - batch.seq_lens address after assign to new_seq_lens {id(batch.seq_lens)}")
                 batch.verify_done = spec_info.verify_done
+                # batch.seq_lens_backup_debug = spec_info.seq_lens_backup_debug
+                # batch.accept_length_debug = spec_info.accept_length_debug
             else:
                 spec_info = None
 
@@ -1940,12 +1996,11 @@ class Scheduler(
                 bid=model_worker_batch.bid,
                 can_run_cuda_graph=forward_output.can_run_cuda_graph,
                 copy_done=copy_done,
+                verify_done=spec_info.verify_done if spec_info is not None else None,
                 accept_length=forward_output.accept_length,
                 # this doesn't change overlap
-                # new_seq_lens=spec_info.new_seq_lens.clone(), # spec_info fields may be modified by next batch, so clone
-                # allocate_lens=spec_info.allocate_lens.clone(),
-                new_seq_lens=spec_info.new_seq_lens,
-                allocate_lens=spec_info.allocate_lens,
+                new_seq_lens=spec_info.new_seq_lens if spec_info is not None else None,
+                allocate_lens=spec_info.allocate_lens if spec_info is not None else None,
             )
         else:  # embedding or reward model
             model_worker_batch = batch.get_model_worker_batch()
@@ -1962,14 +2017,18 @@ class Scheduler(
         launch_done: Optional[threading.Event] = None,
     ):
         if batch.forward_mode.is_decode():
+            print(f"process_batch_result - decode batch")
             self.process_batch_result_decode(batch, result, launch_done)
         elif batch.forward_mode.is_extend():
+            print(f"process_batch_result - extend batch, before process_batch_result_prefill {batch.seq_lens=}")
             self.process_batch_result_prefill(batch, result, launch_done)
+            print(f"process_batch_result - extend batch, after process_batch_result_prefill {batch.seq_lens=}")
         elif batch.forward_mode.is_idle():
             if self.enable_overlap:
                 self.tp_worker.resolve_last_batch_result(launch_done)
                 self.set_next_batch_sampling_info_done(batch)
         elif batch.forward_mode.is_dummy_first():
+            print(f"process_batch_result - dummy first batch")
             self.set_next_batch_sampling_info_done(batch)
 
         if self.return_health_check_ct:
