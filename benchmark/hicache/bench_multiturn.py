@@ -3,8 +3,10 @@ import asyncio
 import json
 import queue
 import random
+import sys
 import threading
 import time
+import traceback
 from datetime import datetime
 from typing import Optional
 
@@ -141,7 +143,9 @@ async def async_request_sglang_generate(
     """
     Sends a streaming request to the server. Gathers text token-by-token.
     """
-    async with aiohttp.ClientSession(timeout=AIOHTTP_TIMEOUT) as session:
+    async with aiohttp.ClientSession(
+        timeout=AIOHTTP_TIMEOUT, read_bufsize=1024 * 1024
+    ) as session:
         headers = {}
         generated_text = ""
         ttft = 0.0
@@ -166,25 +170,28 @@ async def async_request_sglang_generate(
                         else:
                             data = json.loads(chunk)
 
-                            if data["text"]:
-                                timestamp = time.perf_counter()
-                                # First token
-                                if ttft == 0.0:
-                                    ttft = time.perf_counter() - st
-                                    output.ttft = ttft
-                                    prompt_tokens = (data.get("meta_info") or {}).get(
-                                        "prompt_tokens", 0
-                                    )
-                                    cached_tokens = (data.get("meta_info") or {}).get(
-                                        "cached_tokens", 0
-                                    )
+                            if "text" not in data:
+                                print(f"Unexpected data format: {data}")
+                                continue
 
-                                # Decoding phase
-                                else:
-                                    output.itl.append(timestamp - most_recent_timestamp)
+                            timestamp = time.perf_counter()
+                            # First token
+                            if ttft == 0.0:
+                                ttft = time.perf_counter() - st
+                                output.ttft = ttft
+                                prompt_tokens = (data.get("meta_info") or {}).get(
+                                    "prompt_tokens", 0
+                                )
+                                cached_tokens = (data.get("meta_info") or {}).get(
+                                    "cached_tokens", 0
+                                )
 
-                                most_recent_timestamp = timestamp
-                                generated_text = data["text"]
+                            # Decoding phase
+                            else:
+                                output.itl.append(timestamp - most_recent_timestamp)
+
+                            most_recent_timestamp = timestamp
+                            generated_text = data["text"]
 
                     output.generated_text = generated_text
                     output.success = True
@@ -196,8 +203,9 @@ async def async_request_sglang_generate(
                     output.success = False
         except Exception as e:
             output.success = False
-            output.error = str(e)
-            print(f"Request failed: {e}")
+            exc_info = sys.exc_info()
+            output.error = "".join(traceback.format_exception(*exc_info))
+            print(f"{output.error=}")
 
     if pbar:
         pbar.update(1)
