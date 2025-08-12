@@ -378,6 +378,7 @@ class EAGLEWorker(TpModelWorker):
         spec_info: EagleVerifyInput,
         old_spec_info: EagleDraftInput,
     ):
+        ckpt_btw_verify_and_copy_done = None
         # Parse args
         seq_lens_backup = batch.seq_lens
         bs = len(batch.seq_lens)
@@ -422,6 +423,8 @@ class EAGLEWorker(TpModelWorker):
         new_seq_lens = seq_lens_backup + accept_length
         verify_done = torch.cuda.Event()
         verify_done.record()
+        # ckpt_btw_verify_and_copy_done = torch.cuda.Event()
+        # ckpt_btw_verify_and_copy_done.record() # not working
 
         # Move the accepted tokens to the target KV cache locations
         batch.seq_lens = seq_lens_backup
@@ -462,6 +465,9 @@ class EAGLEWorker(TpModelWorker):
         if self.plan_stream:
             torch.cuda.current_stream().wait_stream(self.plan_stream)
 
+        # ckpt_btw_verify_and_copy_done = torch.cuda.Event()
+        # ckpt_btw_verify_and_copy_done.record() # not working
+
         # Run draft extend batch in the main compute stream
         draft_logits_output = self.draft_model_runner.model.forward(
             forward_batch.input_ids, forward_batch.positions, forward_batch
@@ -477,6 +483,12 @@ class EAGLEWorker(TpModelWorker):
         probs = torch.softmax(draft_logits_output.next_token_logits, dim=-1)
         ret_topk_p, ret_topk_index = fast_topk(probs, self.topk, dim=-1)
         ret_hidden_states = draft_logits_output.hidden_states
+        
+        # ckpt_btw_verify_and_copy_done = torch.cuda.Event()
+        # ckpt_btw_verify_and_copy_done.record() # doesn't work
+        # x = torch.ones(1000, 1000, device='cuda')
+        # for _ in range(100):  # Adjust this based on profiling
+        #     x = x @ x.t()  # Matrix multiplication on GPU
 
         # Construct the return values
         draft_input = EagleDraftInput(
@@ -487,6 +499,7 @@ class EAGLEWorker(TpModelWorker):
             new_seq_lens=new_seq_lens,
             allocate_lens=old_spec_info.allocate_lens,
             verify_done=verify_done,
+            ckpt_btw_verify_and_copy_done=ckpt_btw_verify_and_copy_done,
             seq_lens_backup=seq_lens_backup, # This is needed. See EagleDraftInput for more details.
         )
 

@@ -1728,7 +1728,10 @@ class Scheduler(
             lora_set = set([req.lora_path for req in self.running_batch.reqs])
 
         # Get requests from the waiting queue to a new prefill batch
+        # req_added = 0
         for req in self.waiting_queue:
+            # if req_added >= 2:
+            #     break
             if (
                 self.lora_paths
                 and len(
@@ -1757,6 +1760,7 @@ class Scheduler(
 
             req.init_next_round_input(self.tree_cache)
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
+            # req_added += 1
 
             if res != AddReqResult.CONTINUE:
                 if res == AddReqResult.NO_TOKEN:
@@ -1900,10 +1904,13 @@ class Scheduler(
                 # Run forward in a separate stream to avoid blocking the main stream.
                 with self.forward_stream_ctx:
                     forward_output = self.forward_worker.forward_batch_generation(
-                        model_worker_batch
+                        model_worker_batch, batch
                     )
                     copy_done = torch.cuda.Event()
                     copy_done.record()
+                    x = torch.ones(1000, 1000, device='cuda') # this affects racing when wait for copy_done
+                    for _ in range(100):
+                        x = x @ x.t()
             else:
                 forward_output = self.forward_worker.forward_batch_generation(
                     model_worker_batch
@@ -1912,10 +1919,15 @@ class Scheduler(
             batch.output_ids = forward_output.next_token_ids
 
             # Handle speculative decoding output
+            # x = torch.ones(1000, 1000, device='cuda') # this doesn't affect racing
+            # for _ in range(100):
+            #     x = x @ x.t()
             if forward_output.spec_info is not None:
-                spec_info = batch.spec_info = forward_output.spec_info
+                spec_info = batch.spec_info = forward_output.spec_info # this batch.spec_info assignment is sus
                 batch.seq_lens = spec_info.new_seq_lens
                 batch.verify_done = spec_info.verify_done
+                batch.copy_done = copy_done
+                batch.ckpt_btw_verify_and_copy_done = spec_info.ckpt_btw_verify_and_copy_done
             else:
                 spec_info = None
 
@@ -1941,8 +1953,8 @@ class Scheduler(
                 can_run_cuda_graph=forward_output.can_run_cuda_graph,
                 copy_done=copy_done,
                 accept_length=forward_output.accept_length,
-                new_seq_lens=spec_info.new_seq_lens,
-                allocate_lens=spec_info.allocate_lens,
+                new_seq_lens=spec_info.new_seq_lens if spec_info else None,
+                allocate_lens=spec_info.allocate_lens if spec_info else None,
             )
         else:  # embedding or reward model
             model_worker_batch = batch.get_model_worker_batch()

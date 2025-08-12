@@ -265,10 +265,16 @@ class TritonAttnBackend(AttentionBackend):
             attn_lse = None
 
         else:
+            # draft extend
+          #   print(f"init_forward_metadata: {bs=}")
+          #   print(f"init_forward_metadata: 1) {kv_indptr=}")
+          #   print(f"init_forward_metadata: {forward_batch.extend_prefix_lens=}")
             kv_indptr[1 : bs + 1] = torch.cumsum(
                 forward_batch.extend_prefix_lens, dim=0
             )
+          #   print(f"init_forward_metadata: 2) {kv_indptr=}")
             kv_indptr = kv_indptr[: bs + 1]
+          #   print(f"init_forward_metadata: 3) {kv_indptr=}")
             kv_indices = torch.empty(
                 kv_indptr[-1].item(),
                 dtype=torch.int32,

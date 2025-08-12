@@ -64,6 +64,7 @@ class EagleDraftInput:
     allocate_lens: torch.Tensor = None
     new_seq_lens: torch.Tensor = None
     verify_done: torch.cuda.Event = None
+    ckpt_btw_verify_and_copy_done: torch.cuda.Event = None
     
     # seq_lens_backup is not used. But we need to keep a pointer to it to avoid 
     # pytorch cleanup the gpu memory while overlap is still running.
@@ -134,7 +135,7 @@ class EagleDraftInput:
         extend_num_tokens = len(batch.seq_lens) * num_draft_tokens
 
         batch.spec_info = self
-        batch.input_ids = predict
+        batch.input_ids = predict # seen all -1 here
         batch.seq_lens = batch.seq_lens + num_draft_tokens
         batch.seq_lens_cpu = batch.seq_lens_cpu + num_draft_tokens
         batch.seq_lens_sum += extend_num_tokens
@@ -144,8 +145,19 @@ class EagleDraftInput:
         batch.extend_num_tokens = extend_num_tokens
         batch.capture_hidden_mode = CaptureHiddenMode.FULL
         batch.forward_mode = ForwardMode.DRAFT_EXTEND_V2
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.input_ids=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.seq_lens=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.seq_lens_cpu=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.seq_lens_sum=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.extend_seq_lens=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.extend_prefix_lens=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.extend_prefix_lens_cpu=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.extend_num_tokens=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.capture_hidden_mode=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.forward_mode=}")
+      #  print(f"prepare_for_extend_to_fill_draft_kvcache - {batch.spec_info=}") # seen error here
         forward_batch = ForwardBatch.init_new(batch, draft_model_runner)
-        draft_model_runner.attn_backend.init_forward_metadata(forward_batch)
+        draft_model_runner.attn_backend.init_forward_metadata(forward_batch) # seen error here kv_indptr[-1].item()
         return forward_batch
 
 

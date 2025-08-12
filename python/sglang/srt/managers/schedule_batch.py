@@ -1040,8 +1040,10 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         bs = self.batch_size()
 
         # We need this to get the correct self.seq_lens
-        if self.verify_done is not None:
-            self.verify_done.synchronize()
+        # if self.verify_done is not None:
+        #     self.verify_done.synchronize()
+        # if self.copy_done is not None:
+        #     self.copy_done.synchronize() # this doesn't work
         
         self.seq_lens_sum = self.seq_lens.sum().item()
         new_allocate_lens = self.seq_lens + alloc_len_per_eagle_decode(worker)
@@ -1612,6 +1614,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
     ):
         if self.verify_done is not None:
             self.verify_done.synchronize()
+        # if self.copy_done is not None:
+        #     self.copy_done.synchronize() # this works
 
         if keep_indices is None:
             if isinstance(chunked_req_to_exclude, Req):
@@ -1657,13 +1661,21 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         else:
             self.top_logprobs_nums = None
             self.token_ids_logprobs = None
+        # if self.copy_done is not None:
+        #     self.copy_done.synchronize() # this works
 
         self.has_stream = any(req.stream for req in self.reqs)
         self.has_grammar = any(req.grammar for req in self.reqs)
 
         self.sampling_info.filter_batch(keep_indices, keep_indices_device)
+        if self.copy_done is not None:
+            self.copy_done.synchronize() # this works
+        # if self.ckpt_btw_verify_and_copy_done is not None:
+        #     self.ckpt_btw_verify_and_copy_done.synchronize() # checking
         if self.spec_info:
-            self.spec_info.filter_batch(keep_indices_device)
+            self.spec_info.filter_batch(keep_indices_device) # this requires copy_done, so it races with draft extend, why?
+        # if self.copy_done is not None:
+        #     self.copy_done.synchronize() # this doesn't work
 
     def merge_batch(self, other: "ScheduleBatch"):
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because

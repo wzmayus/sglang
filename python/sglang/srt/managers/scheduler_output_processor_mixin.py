@@ -760,10 +760,13 @@ class SchedulerOutputProcessorMixin:
         # spec dec: free the extra allocated tokens
         allocate_len = allocate_lens[batch_idx]
         if new_seq_lens is None:
+            # print(f"free_spec_dec_tokens_page_size_1 - new_seq_lens is None")
             # for overlap, the last iteration's allocation is not used. It's not true if the cur batch is extend.
             start_len = allocate_len - alloc_len_per_eagle_decode(self.draft_worker)
         else:
             # for non-overlap, the last iteration will accept some tokens
             start_len = new_seq_lens[batch_idx]
+            # print(f"free_spec_dec_tokens_page_size_1 - {batch_idx=}, {new_seq_lens=}")
+        # print(f"free_spec_dec_tokens_page_size_1 - start_len={start_len}, allocate_len={allocate_len}, {req.req_pool_idx=}")
         indices_to_free = self.req_to_token_pool.req_to_token[req.req_pool_idx][start_len:allocate_len]
         self.token_to_kv_pool_allocator.free(indices_to_free)
