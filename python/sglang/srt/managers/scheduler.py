@@ -1916,16 +1916,18 @@ class Scheduler(
 
                 # Run forward in a separate stream to avoid blocking the main stream.
                 with self.forward_stream_ctx:
-                    # model_worker_batch.spec_info is a future from the previous batch
+                    # spec_info / input_ids is a future from the previous batch.
                     # resolve it with the future_map
                     self.future_map.resolve_future(model_worker_batch)
 
                     forward_output = self.forward_worker.forward_batch_generation(
                         model_worker_batch
                     )
-                    # store the spec_info to the future_map for next batch resolution
-                    if forward_output.spec_info is not None:
-                        self.future_map.store_to_map(future_ct, bs, forward_output)
+                    
+                    # store spec_info / output_ids to the future_map for next batch resolution
+                    self.future_map.store_to_map(future_ct, bs, forward_output)
+
+                    # copy the output to the main stream
                     copy_done = torch.cuda.Event()
                     copy_done.record()
 
@@ -1935,6 +1937,8 @@ class Scheduler(
                     if forward_output.spec_info is not None
                     else None
                 )
+
+                # update the spec_info / output_ids for next batch resolution
                 self.future_map.update_next_future(
                     batch, future_ct, bs, output_allocate_lens
                 )
