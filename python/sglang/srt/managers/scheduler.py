@@ -600,23 +600,45 @@ class Scheduler(
                     enable_kv_cache_events=self.enable_kv_cache_events,
                 )
             elif self.enable_hierarchical_cache:
-                self.tree_cache = HiRadixCache(
-                    req_to_token_pool=self.req_to_token_pool,
-                    token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
-                    tp_cache_group=(
-                        self.attn_tp_cpu_group
-                        if self.server_args.enable_dp_attention
-                        else self.tp_cpu_group
-                    ),
-                    page_size=self.page_size,
-                    hicache_ratio=server_args.hicache_ratio,
-                    hicache_size=server_args.hicache_size,
-                    hicache_write_policy=server_args.hicache_write_policy,
-                    hicache_io_backend=server_args.hicache_io_backend,
-                    hicache_mem_layout=server_args.hicache_mem_layout,
-                    hicache_storage_backend=server_args.hicache_storage_backend,
-                    hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
-                )
+                if os.environ.get("SGLANG_EXPERIMENTAL_CPP_HIRADIX_TREE") == "1":
+                    # lazy import to avoid JIT overhead
+                    from sglang.srt.mem_cache.hiradix_cache_cpp import HiRadixCacheCpp
+
+                    self.tree_cache = HiRadixCacheCpp(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        tp_cache_group=(
+                            self.attn_tp_cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_cpu_group
+                        ),
+                        page_size=self.page_size,
+                        hicache_ratio=server_args.hicache_ratio,
+                        hicache_size=server_args.hicache_size,
+                        hicache_write_policy=server_args.hicache_write_policy,
+                        hicache_io_backend=server_args.hicache_io_backend,
+                        hicache_mem_layout=server_args.hicache_mem_layout,
+                        hicache_storage_backend=server_args.hicache_storage_backend,
+                        hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
+                    )
+                else:
+                    self.tree_cache = HiRadixCache(
+                        req_to_token_pool=self.req_to_token_pool,
+                        token_to_kv_pool_allocator=self.token_to_kv_pool_allocator,
+                        tp_cache_group=(
+                            self.attn_tp_cpu_group
+                            if self.server_args.enable_dp_attention
+                            else self.tp_cpu_group
+                        ),
+                        page_size=self.page_size,
+                        hicache_ratio=server_args.hicache_ratio,
+                        hicache_size=server_args.hicache_size,
+                        hicache_write_policy=server_args.hicache_write_policy,
+                        hicache_io_backend=server_args.hicache_io_backend,
+                        hicache_mem_layout=server_args.hicache_mem_layout,
+                        hicache_storage_backend=server_args.hicache_storage_backend,
+                        hicache_storage_prefetch_policy=server_args.hicache_storage_prefetch_policy,
+                    )
                 self.tp_worker.register_hicache_layer_transfer_counter(
                     self.tree_cache.cache_controller.layer_done_counter
                 )

@@ -152,14 +152,6 @@ class HiRadixCache(RadixCache):
             if node.hit_count >= self.write_through_threshold:
                 # write to host if the node is not backuped
                 self.write_backup(node)
-        else:
-            if (
-                self.enable_storage
-                and (not node.backuped_storage)
-                and node.hit_count >= self.write_through_threshold_storage
-            ):
-                # if the node is backuped on host memory but not on storage
-                self.write_backup_storage(node)
 
     def writing_check(self, write_back=False):
         if write_back:
@@ -180,7 +172,11 @@ class HiRadixCache(RadixCache):
             )
         for _ in range(queue_size.item()):
             ack_id = self.cache_controller.ack_write_queue.get()
-            self.dec_lock_ref(self.ongoing_write_through[ack_id])
+            written_node = self.ongoing_write_through[ack_id]
+            self.dec_lock_ref(written_node)
+            if self.enable_storage:
+                # write through to storage after the write to host is done
+                self.write_backup_storage(written_node)
             del self.ongoing_write_through[ack_id]
 
     def loading_check(self):
@@ -190,8 +186,6 @@ class HiRadixCache(RadixCache):
                 start_node, end_node = self.ongoing_load_back[ack_id]
                 self.dec_lock_ref(end_node)
                 while end_node != start_node:
-                    assert end_node.loading
-                    end_node.loading = False
                     end_node = end_node.parent
                 # clear the reference
                 del self.ongoing_load_back[ack_id]
@@ -324,13 +318,21 @@ class HiRadixCache(RadixCache):
         self.ongoing_load_back[last_hit_node.id] = (ancester_node, last_hit_node)
         offset = 0
         for node in nodes_to_load:
-            node.value = device_indices[offset : offset + len(node.host_value)]
+            self.assign_value(
+                node, device_indices[offset : offset + len(node.host_value)]
+            )
             offset += len(node.host_value)
-            node.loading = True
-        self.evictable_size_ += len(device_indices)
         self.inc_lock_ref(last_hit_node)
 
         return device_indices
+
+    def assign_value(
+        self,
+        node: TreeNode,
+        new_indices: torch.Tensor,
+    ):
+        node.value = new_indices
+        self.evictable_size_ += len(new_indices)
 
     def init_load_back(
         self,
@@ -635,7 +637,6 @@ class HiRadixCache(RadixCache):
         new_node.parent = child.parent
         new_node.lock_ref = child.lock_ref
         new_node.key = child.key[:split_len]
-        new_node.loading = child.loading
         new_node.hit_count = child.hit_count
 
         # split value and host value if exists

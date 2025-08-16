@@ -6,8 +6,9 @@ import torch
 
 from sglang.srt.mem_cache.allocator import BaseTokenToKVPoolAllocator
 from sglang.srt.mem_cache.base_prefix_cache import MatchResult
+from sglang.srt.mem_cache.hiradix_cache import HiRadixCache
 from sglang.srt.mem_cache.memory_pool import ReqToTokenPool
-from sglang.srt.mem_cache.radix_cache import HiRadixCache, TreeNode
+from sglang.srt.mem_cache.radix_cache import TreeNode
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ class HiRadixCacheCpp(HiRadixCache):
         hicache_storage_backend: Optional[str] = None,
         hicache_storage_prefetch_policy: Optional[str] = "best_effort",
     ):
-        self.device = self.token_to_kv_pool_allocator.device
+        self.device = torch.device(token_to_kv_pool_allocator.device)
         self.hiradix_core = hiradix_core.HiRadixTreeCore(page_size, self.device)
         super().__init__(
             req_to_token_pool=req_to_token_pool,
@@ -57,6 +58,7 @@ class HiRadixCacheCpp(HiRadixCache):
 
     def reset(self):
         self.hiradix_core.reset()
+        self.root_node = self.hiradix_core.root_node
         self.cache_controller.reset()
         self.token_to_kv_pool_host.clear()
 
@@ -72,7 +74,24 @@ class HiRadixCacheCpp(HiRadixCache):
         )
 
     def _insert_helper(self, node: TreeNode, key: List[int], value=None):
-        return self.hiradix_core.insert_helper(node, key, value)
+        new_node, matched_len = self.hiradix_core.insert_helper(node, key, value)
+
+        if new_node is not None:
+            # write through every new nodes
+            self.write_backup(new_node)
+            if self.enable_storage:
+                last_hash = new_node.parent.get_last_hash_value()
+                hash_value = []
+                for idx in range(0, len(key), self.page_size):
+                    hash_value.append(
+                        self.cache_controller.get_hash_str(
+                            key[idx : idx + self.page_size],
+                            prior_hash=last_hash,
+                        )
+                    )
+                    last_hash = hash_value[-1]
+                new_node.hash_value = hash_value
+        return matched_len
 
     def _insert_helper_host(
         self, node: TreeNode, key: List[int], host_value, hash_value
@@ -81,13 +100,13 @@ class HiRadixCacheCpp(HiRadixCache):
 
     def evict(self, num_tokens: int):
         to_free = self.hiradix_core.evict_device(num_tokens)
-        if to_free and to_free.numel() > 0:
+        if to_free.numel() > 0:
             self.cache_controller.mem_pool_device_allocator.free(to_free)
 
     def evict_host(self, num_tokens: int):
         to_free = self.hiradix_core.evict_host(num_tokens)
-        if to_free and to_free.numel() > 0:
-            self.cache_controller.mem_pool_host_allocator.free(to_free)
+        if to_free.numel() > 0:
+            self.cache_controller.evict_host(to_free)
 
     def _split_node(self, key, child: TreeNode, split_len: int):
         return self.hiradix_core.split_node(child, split_len)
@@ -104,54 +123,12 @@ class HiRadixCacheCpp(HiRadixCache):
     def protected_size(self):
         return self.hiradix_core.protected_size()
 
-    def load_back(
-        self, node: TreeNode, mem_quota: Optional[int] = None
-    ) -> Optional[torch.Tensor]:
-        # todo: more loading policies
-
-        last_hit_node = node
-        nodes_to_load = []
-        while node.evicted:
-            assert (
-                node.backuped
-            ), "No backup available on evicted nodes, should not happen"
-            nodes_to_load.insert(0, node)
-            node = node.parent
-        else:
-            ancester_node = node
-
-        # protect the ancestor nodes from eviction
-        delta = self.inc_lock_ref(ancester_node)
-
-        # load it all or not at all
-        host_indices = torch.cat([n.host_value for n in nodes_to_load])
-        if len(host_indices) < self.load_back_threshold or (
-            len(host_indices) > mem_quota + delta if mem_quota is not None else False
-        ):
-            # skip loading back if the total size is too small or exceeding the memory quota
-            self.dec_lock_ref(ancester_node)
-            return None
-
-        device_indices = self.cache_controller.load(
-            host_indices=host_indices, node_id=last_hit_node.id
+    def assign_value(
+        self,
+        node: TreeNode,
+        new_indices: torch.Tensor,
+    ):
+        self.hiradix_core.set_node_value(
+            node,
+            new_indices,
         )
-        if device_indices is None:
-            self.evict(len(host_indices))
-            device_indices = self.cache_controller.load(
-                host_indices=host_indices, node_id=last_hit_node.id
-            )
-        self.dec_lock_ref(ancester_node)
-        if device_indices is None:
-            # no sufficient GPU memory to load back KV caches
-            return None
-
-        self.ongoing_load_back[last_hit_node.id] = (ancester_node, last_hit_node)
-        offset = 0
-        for node in nodes_to_load:
-            self.hiradix_core.set_device_indices(
-                node, device_indices[offset : offset + len(node.host_value)]
-            )
-            offset += len(node.host_value)
-        self.inc_lock_ref(last_hit_node)
-
-        return device_indices
