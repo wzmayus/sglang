@@ -2,7 +2,6 @@ import heapq
 import logging
 import threading
 import time
-from queue import Queue
 from typing import List, Optional
 
 import torch
@@ -113,13 +112,6 @@ class HiRadixCache(RadixCache):
         self.cache_controller.reset()
         self.token_to_kv_pool_host.clear()
         super().reset()
-
-    def get_height(self, node: TreeNode):
-        height = 0
-        while node != self.root_node:
-            node = node.parent
-            height += 1
-        return height
 
     def write_backup(self, node: TreeNode, write_back=False):
         host_indices = self.cache_controller.write(
@@ -605,6 +597,7 @@ class HiRadixCache(RadixCache):
             new_node.key = key
             new_node.value = None
             new_node.host_value = host_value
+            # todo, only assign the unmatched hash value
             new_node.hash_value = hash_value
             node.children[child_key] = new_node
         return matched_length
