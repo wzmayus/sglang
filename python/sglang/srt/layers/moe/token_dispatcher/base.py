@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Protocol, TypeGuard, Union, runtime_checkable
 import torch
 
 if TYPE_CHECKING:
+    from sglang.srt.layers.moe.topk import TopKOutput
     from sglang.srt.layers.moe.token_dispatcher import (
         AscendDeepEPLLOutput,
         DeepEPLLOutput,
@@ -148,9 +149,9 @@ class BaseDispatcher(ABC):
     """Base class for dispatchers."""
 
     @abstractmethod
-    def dispatch(self, *args, **kwargs) -> DispatchOutput:
+    def dispatch(self, hidden_states: torch.Tensor, topk_output: TopKOutput, **kwargs) -> DispatchOutput:
         pass
 
     @abstractmethod
-    def combine(self, *args, **kwargs) -> torch.Tensor:
+    def combine(self, combine_input: CombineInput, **kwargs) -> torch.Tensor:
         pass

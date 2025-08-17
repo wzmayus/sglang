@@ -23,7 +23,7 @@ from sglang.srt.layers.moe import (
     get_moe_runner_backend,
     should_use_flashinfer_trtllm_moe,
 )
-from sglang.srt.layers.moe.token_dispatcher.standard import StandardDispatchOutput
+from sglang.srt.layers.moe.token_dispatcher.standard import CombineInput, StandardDispatcher
 from sglang.srt.layers.moe.topk import TopKOutput, TopKOutputChecker
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -189,15 +189,6 @@ class FusedMoE(torch.nn.Module):
         self.use_presharded_weights = use_presharded_weights
 
         self.use_triton_kernels = get_moe_runner_backend().is_triton_kernel()
-        if quant_config is None:
-            self.quant_method: FusedMoEMethodBase = UnquantizedFusedMoEMethod(
-                self.use_triton_kernels
-            )
-        else:
-            self.quant_method: FusedMoEMethodBase = quant_config.get_quant_method(
-                self, prefix
-            )
-        assert self.quant_method is not None
 
         self.quant_config = quant_config
         self.use_flashinfer_mxfp4_moe = get_moe_runner_backend().is_flashinfer_mxfp4()
@@ -228,6 +219,16 @@ class FusedMoE(torch.nn.Module):
             gemm1_clamp_limit=gemm1_clamp_limit,
         )
 
+        if quant_config is None:
+            self.quant_method: FusedMoEMethodBase = UnquantizedFusedMoEMethod(
+                self.use_triton_kernels
+            )
+        else:
+            self.quant_method: FusedMoEMethodBase = quant_config.get_quant_method(
+                self, prefix
+            )
+        assert self.quant_method is not None
+
         self.quant_method.create_weights(
             layer=self,
             num_experts=self.num_local_experts,
@@ -243,6 +244,7 @@ class FusedMoE(torch.nn.Module):
         )
 
         self.quant_method.create_moe_runner(self, self.moe_runner_config)
+        self.dispatcher = StandardDispatcher()
 
     def _load_per_tensor_weight_scale(
         self,
@@ -825,20 +827,15 @@ class FusedMoE(torch.nn.Module):
             elif TopKOutputChecker.format_is_triton_kernel(topk_output):
                 raise NotImplementedError()
 
-        dispatch_output = StandardDispatchOutput(
-            hidden_states=hidden_states, topk_output=topk_output
+        dispatch_output = self.dispatcher.dispatch(hidden_states=hidden_states, topk_output=topk_output)
+
+        # TODO: consider using symmetric memory
+        combine_input = self.quant_method.apply(
+            layer=self,
+            dispatch_output=dispatch_output,
         )
 
-        # Matrix multiply.
-        with use_symmetric_memory(get_tp_group()) as sm:
-
-            final_hidden_states = self.quant_method.apply(
-                layer=self,
-                dispatch_output=dispatch_output,
-            )
-            sm.tag(final_hidden_states)
-
-        final_hidden_states = final_hidden_states.hidden_states
+        final_hidden_states = self.dispatcher.combine(combine_input)
 
         final_hidden_states = final_hidden_states[
             ..., :origin_hidden_states_dim
