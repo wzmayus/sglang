@@ -599,7 +599,6 @@ class HiRadixCache(RadixCache):
             new_node.key = key
             new_node.value = None
             new_node.host_value = host_value
-            # todo, only assign the unmatched hash value
             new_node.hash_value = hash_value
             node.children[child_key] = new_node
         return matched_length

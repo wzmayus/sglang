@@ -67,7 +67,11 @@ struct TreeNode {
 
   int64_t id = 0; // stable node id
 
-  inline bool evicted() const { return !value.defined() || value.numel() == 0; }
+  inline bool evicted() const {
+    if (is_root())
+      return false;
+    return !value.defined() || value.numel() == 0;
+  }
   inline bool backuped() const {
     return host_value.defined() && host_value.numel() > 0;
   }
@@ -121,7 +125,8 @@ public:
 
     int64_t total_matched = 0;
     for (auto &t : vals)
-      total_matched += t.numel();
+      if (t.defined())
+        total_matched += t.size(0);
     torch::Tensor out = torch::empty(
         {total_matched},
         torch::TensorOptions().dtype(torch::kInt64).device(device_));
@@ -285,6 +290,10 @@ public:
 
   // Split 'child' into new_node -> child at split_len
   TreeNode *split_node(TreeNode *child, int64_t split_len) {
+    if (split_len <= 0 || split_len >= child->key.size()) {
+      throw std::runtime_error("Invalid split length.");
+    }
+
     auto *new_node = make_node();
     // move topology
     new_node->parent = child->parent;
