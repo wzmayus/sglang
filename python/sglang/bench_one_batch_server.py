@@ -315,7 +315,6 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
                     result_filename=bench_args.result_filename,
                     tokenizer=tokenizer,
                     profile_filename_prefix=bench_args.profile_filename_prefix,
-
                 )
             )
 
@@ -372,15 +371,15 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     summary += "\n"
 
     for (
-            batch_size,
-            latency,
-            ttft,
-            input_throughput,
-            output_throughput,
-            overall_throughput,
-            last_gen_throughput,
-            acc_length,
-            trace_link,
+        batch_size,
+        latency,
+        ttft,
+        input_throughput,
+        output_throughput,
+        overall_throughput,
+        last_gen_throughput,
+        acc_length,
+        trace_link,
     ) in result:
         hourly_cost = 2 * server_args.tp_size  # $2/hour for one H100
         input_util = 0.7
