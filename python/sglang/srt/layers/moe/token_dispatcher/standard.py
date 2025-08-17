@@ -1,15 +1,25 @@
 from __future__ import annotations
 
-from typing import NamedTuple
+from typing import TYPE_CHECKING, NamedTuple
 
-from sglang.srt.layers.moe.token_dispatcher.base_dispatcher import (
+import torch
+
+from sglang.srt.layers.moe.token_dispatcher.base import (
+    CombineInput,
+    CombineInputFormat,
     DispatchOutput,
     DispatchOutputFormat,
 )
 
+if TYPE_CHECKING:
+    from sglang.srt.layers.moe.topk import StandardTopKOutput
+
 
 class StandardDispatchOutput(NamedTuple):
     """Standard dispatch output."""
+
+    hidden_states: torch.Tensor
+    topk_output: StandardTopKOutput
 
     @property
     def format(self) -> DispatchOutputFormat:
@@ -17,3 +27,16 @@ class StandardDispatchOutput(NamedTuple):
 
 
 assert isinstance(StandardDispatchOutput, DispatchOutput)
+
+
+class StandardCombineInput(NamedTuple):
+    """Standard combine input."""
+
+    hidden_states: torch.Tensor
+
+    @property
+    def format(self) -> CombineInputFormat:
+        return CombineInputFormat.STANDARD
+
+
+assert isinstance(StandardCombineInput, CombineInput)

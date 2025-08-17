@@ -50,7 +50,7 @@ from sglang.srt.utils import (
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.topk import TopKOutput
+    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
 
 _is_cuda = is_cuda()
 _is_cpu_amx_available = cpu_has_amx_support()
@@ -417,7 +417,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        intermediate_size: int,
+        intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ):
@@ -428,7 +428,10 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         # WEIGHTS
         w13_weight = torch.nn.Parameter(
             torch.empty(
-                num_experts, 2 * intermediate_size, hidden_size, dtype=torch.int8
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                dtype=torch.int8,
             ),
             requires_grad=False,
         )
@@ -436,14 +439,21 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w13_weight, extra_weight_attrs)
 
         w2_weight = torch.nn.Parameter(
-            torch.empty(num_experts, hidden_size, intermediate_size, dtype=torch.int8),
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=torch.int8,
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
 
         w13_weight_scale = torch.nn.Parameter(
-            torch.ones(num_experts, 2 * intermediate_size, 1, dtype=torch.float32),
+            torch.ones(
+                num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
+            ),
             requires_grad=False,
         )
         w2_weight_scale = torch.nn.Parameter(
@@ -483,21 +493,27 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight_scale.data, requires_grad=False
         )
 
+    def create_moe_runner(
+        self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
+    ):
+        self.moe_runner_config = moe_runner_config
+
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_output: TopKOutput,
-        moe_runner_config: MoeRunnerConfig,
+        dispatch_output: StandardDispatchOutput,
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
 
         if use_intel_amx_backend(layer):
             from sglang.srt.layers.moe.topk import apply_topk_weights_cpu
 
             topk_weights, topk_ids, _ = topk_output
             x, topk_weights = apply_topk_weights_cpu(
-                moe_runner_config.apply_router_weight_on_input, topk_weights, x
+                self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
             )
             return torch.ops.sgl_kernel.fused_experts_cpu(
                 x,
@@ -521,7 +537,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             layer.w13_weight,
             layer.w2_weight,
             topk_output=topk_output,
-            moe_runner_config=moe_runner_config,
+            moe_runner_config=self.moe_runner_config,
             use_int8_w8a8=True,
             per_channel_quant=True,
             w1_scale=(layer.w13_weight_scale),
@@ -896,7 +912,7 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
-        intermediate_size: int,
+        intermediate_size_per_partition: int,
         params_dtype: torch.dtype,
         **extra_weight_attrs,
     ) -> None:
@@ -910,21 +926,31 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         # weight
         w13_weight = torch.nn.Parameter(
             torch.empty(
-                num_experts, 2 * intermediate_size, hidden_size, dtype=torch.int8
+                num_experts,
+                2 * intermediate_size_per_partition,
+                hidden_size,
+                dtype=torch.int8,
             ),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight", w13_weight)
         set_weight_attrs(w13_weight, extra_weight_attrs)
         w2_weight = torch.nn.Parameter(
-            torch.empty(num_experts, hidden_size, intermediate_size, dtype=torch.int8),
+            torch.empty(
+                num_experts,
+                hidden_size,
+                intermediate_size_per_partition,
+                dtype=torch.int8,
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w2_weight", w2_weight)
         set_weight_attrs(w2_weight, extra_weight_attrs)
         # scale
         w13_weight_scale = torch.nn.Parameter(
-            torch.empty(num_experts, 2 * intermediate_size, 1, dtype=torch.float32),
+            torch.empty(
+                num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_scale", w13_weight_scale)
@@ -937,7 +963,9 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         set_weight_attrs(w2_weight_scale, extra_weight_attrs)
         # offset
         w13_weight_offset = torch.nn.Parameter(
-            torch.empty(num_experts, 2 * intermediate_size, 1, dtype=torch.float32),
+            torch.empty(
+                num_experts, 2 * intermediate_size_per_partition, 1, dtype=torch.float32
+            ),
             requires_grad=False,
         )
         layer.register_parameter("w13_weight_offset", w13_weight_offset)
@@ -969,13 +997,18 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight_offset.data.squeeze(-1).contiguous(), requires_grad=False
         )
 
+    def create_moe_runner(
+        self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
+    ):
+        self.moe_runner_config = moe_runner_config
+
     def apply(
         self,
         layer,
-        x,
-        topk_output: TopKOutput,
-        moe_runner_config: MoeRunnerConfig,
+        dispatch_output: StandardDispatchOutput,
     ) -> torch.Tensor:
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
 
         topk_weights, topk_ids, _ = topk_output
         topk_ids = topk_ids.to(torch.int32)
