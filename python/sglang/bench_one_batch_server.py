@@ -46,6 +46,7 @@ class BenchArgs:
     show_report: bool = False
     profile: bool = False
     profile_by_stage: bool = False
+    profile_filename_prefix: str = None
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -79,14 +80,24 @@ class BenchArgs:
         parser.add_argument("--show-report", action="store_true")
         parser.add_argument("--profile", action="store_true")
         parser.add_argument("--profile-by-stage", action="store_true")
+        parser.add_argument(
+            "--profile-filename-prefix",
+            type=str,
+            default=BenchArgs.profile_filename_prefix,
+        )
 
     @classmethod
     def from_cli_args(cls, args: argparse.Namespace):
         # use the default value's type to cast the args into correct types.
         attrs = [(attr.name, type(attr.default)) for attr in dataclasses.fields(cls)]
-        return cls(
-            **{attr: attr_type(getattr(args, attr)) for attr, attr_type in attrs}
-        )
+        kwargs = {}
+        for attr, attr_type in attrs:
+            val = getattr(args, attr)
+            if attr_type is type(None):
+                kwargs[attr] = val
+            else:
+                kwargs[attr] = attr_type(val)
+        return cls(**kwargs)
 
 
 def launch_server_internal(server_args):
@@ -133,6 +144,7 @@ def run_one_case(
     tokenizer,
     profile: bool = False,
     profile_by_stage: bool = False,
+    profile_filename_prefix: str = None,
 ):
     requests.post(url + "/flush_cache")
     input_requests = sample_random_requests(
@@ -161,8 +173,12 @@ def run_one_case(
 
     profile_link = None
     if profile:
+        output_dir, profile_name = None, None
+        if profile_filename_prefix:
+            output_dir = os.path.dirname(profile_filename_prefix)
+            profile_name = os.path.basename(profile_filename_prefix)
         profile_link: str = run_profile(
-            url, 3, ["CPU", "GPU"], None, None, profile_by_stage
+            url, 3, ["CPU", "GPU"], output_dir, profile_name, profile_by_stage
         )
 
     tic = time.perf_counter()
@@ -243,7 +259,7 @@ def run_one_case(
         overall_throughput,
         last_gen_throughput,
         acc_length,
-        profile_link if profile else None,
+        profile_link,
     )
 
 
@@ -298,6 +314,8 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
                     run_name=bench_args.run_name,
                     result_filename=bench_args.result_filename,
                     tokenizer=tokenizer,
+                    profile_filename_prefix=bench_args.profile_filename_prefix,
+
                 )
             )
 
@@ -322,6 +340,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
                                 tokenizer=tokenizer,
                                 profile=bench_args.profile,
                                 profile_by_stage=bench_args.profile_by_stage,
+                                profile_filename_prefix=bench_args.profile_filename_prefix,
                             )[-1],
                         )
                     )
@@ -353,15 +372,15 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
     summary += "\n"
 
     for (
-        batch_size,
-        latency,
-        ttft,
-        input_throughput,
-        output_throughput,
-        overall_throughput,
-        last_gen_throughput,
-        acc_length,
-        trace_link,
+            batch_size,
+            latency,
+            ttft,
+            input_throughput,
+            output_throughput,
+            overall_throughput,
+            last_gen_throughput,
+            acc_length,
+            trace_link,
     ) in result:
         hourly_cost = 2 * server_args.tp_size  # $2/hour for one H100
         input_util = 0.7
@@ -372,7 +391,7 @@ def run_benchmark(server_args: ServerArgs, bench_args: BenchArgs):
             f"{input_throughput:.2f} | "
             f"{output_throughput:.2f} | "
             f"{accept_length} | "
-            f"{1 / (output_throughput/batch_size) * 1000:.2f} | "
+            f"{1 / (output_throughput / batch_size) * 1000:.2f} | "
             f"{1e6 / (input_throughput * input_util) / 3600 * hourly_cost:.2f} | "
             f"{1e6 / output_throughput / 3600 * hourly_cost:.2f} |"
         )
