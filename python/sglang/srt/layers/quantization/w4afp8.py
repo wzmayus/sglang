@@ -7,6 +7,7 @@ import torch
 from torch.nn import Module
 from torch.nn.parameter import Parameter
 
+from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
     QuantizationConfig,
@@ -20,7 +21,10 @@ from sglang.srt.utils import set_weight_attrs
 if TYPE_CHECKING:
     from sglang.srt.layers.moe import MoeRunnerConfig
     from sglang.srt.layers.moe.ep_moe.layer import EPMoE
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -287,13 +291,12 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         self,
         layer: EPMoE,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
-
-        # TODO(ch-wan): move it out of this class
-        from sglang.srt.layers.moe.cutlass_w4a8_moe import cutlass_w4a8_moe
 
         topk_weights, topk_ids, _ = topk_output
         local_topk_ids = topk_ids
@@ -331,4 +334,4 @@ class W4AFp8MoEMethod(FusedMoEMethodBase):
         )
         if self.moe_runner_config.routed_scaling_factor is not None:
             output *= self.moe_runner_config.routed_scaling_factor
-        return output
+        return StandardCombineInput(hidden_states=output)

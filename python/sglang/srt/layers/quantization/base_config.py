@@ -11,7 +11,7 @@ from torch import nn
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import DispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import CombineInput, DispatchOutput
 
 
 class QuantizeMethodBase(ABC):
@@ -107,7 +107,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         layer: torch.nn.Module,
         dispatch_output: DispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
         raise NotImplementedError
 
 

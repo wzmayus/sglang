@@ -23,7 +23,10 @@ from sglang.srt.layers.moe import (
     get_moe_runner_backend,
     should_use_flashinfer_trtllm_moe,
 )
-from sglang.srt.layers.moe.token_dispatcher.standard import CombineInput, StandardDispatcher
+from sglang.srt.layers.moe.token_dispatcher.standard import (
+    CombineInput,
+    StandardDispatcher,
+)
 from sglang.srt.layers.moe.topk import TopKOutput, TopKOutputChecker
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -827,7 +830,9 @@ class FusedMoE(torch.nn.Module):
             elif TopKOutputChecker.format_is_triton_kernel(topk_output):
                 raise NotImplementedError()
 
-        dispatch_output = self.dispatcher.dispatch(hidden_states=hidden_states, topk_output=topk_output)
+        dispatch_output = self.dispatcher.dispatch(
+            hidden_states=hidden_states, topk_output=topk_output
+        )
 
         # TODO: consider using symmetric memory
         combine_input = self.quant_method.apply(

@@ -10,10 +10,14 @@ from torch.nn.parameter import Parameter
 from sglang.srt.distributed import get_tp_group
 from sglang.srt.layers.dp_attention import get_dp_global_num_tokens, get_local_dp_buffer
 from sglang.srt.layers.moe import (
+    MoeRunner,
+    MoeRunnerBackend,
+    MoeRunnerConfig,
     should_use_flashinfer_cutlass_moe_fp4_allgather,
     should_use_flashinfer_trtllm_moe,
 )
 from sglang.srt.layers.moe.cutlass_moe_params import CutlassMoEParams, CutlassMoEType
+from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.parameter import ModelWeightParameter, PerTensorScaleParameter
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -39,9 +43,10 @@ from sglang.srt.utils import is_cuda, next_power_of_2
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.fused_moe_triton.layer import FusedMoE
-    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
-    from sglang.srt.layers.moe.topk import TopKOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
 
 if is_cuda():
     from sgl_kernel import scaled_fp4_quant
@@ -434,30 +439,26 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
+        self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
     def apply(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+    ) -> CombineInput:
 
-        x = dispatch_output.hidden_states
-        topk_output = dispatch_output.topk_output
-
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_output=topk_output,
-            moe_runner_config=self.moe_runner_config,
+        quant_info = TritonMoeQuantInfo(
+            w13_weight=layer.w13_weight,
+            w2_weight=layer.w2_weight,
             use_fp8_w8a8=True,
-            per_channel_quant=False,  # ModelOpt uses per-tensor quantization
-            w1_scale=layer.w13_weight_scale,
+            per_channel_quant=False,
+            w13_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
         )
+
+        return self.runner.run(dispatch_output, quant_info)
 
 
 class ModelOptFp4Config(QuantizationConfig):
@@ -1186,7 +1187,9 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
         self,
         layer: FusedMoE,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
@@ -1200,7 +1203,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
         # Check if this is a FlashInferFP4MoE layer that should handle its own forward
         if hasattr(layer, "gemm1_weights_fp4_shuffled"):
             # This layer was processed with flashinfer TRTLLM - delegate to its own forward
-            return layer.forward(x, topk_output)
+            return StandardCombineInput(hidden_states=layer.forward(x, topk_output))
 
         if self.enable_flashinfer_cutlass_moe:
             assert (
@@ -1260,7 +1263,7 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
                 get_tp_group().reduce_scatterv(
                     global_output, output=output, sizes=get_dp_global_num_tokens()
                 )
-            return output
+            return StandardCombineInput(hidden_states=output)
 
         from sglang.srt.layers.moe.cutlass_moe import cutlass_moe_fp4
 
@@ -1282,4 +1285,5 @@ class ModelOptNvFp4FusedMoEMethod(FusedMoEMethodBase):
         ).to(x.dtype)
         if moe_runner_config.routed_scaling_factor is not None:
             output *= moe_runner_config.routed_scaling_factor
-        return output
+
+        return StandardCombineInput(hidden_states=output)

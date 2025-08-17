@@ -9,6 +9,8 @@ import torch
 from torch.nn import Module
 
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
+from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
+from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.parameter import BlockQuantScaleParameter, ModelWeightParameter
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -22,8 +24,10 @@ from sglang.srt.layers.quantization.utils import is_layer_skipped
 from sglang.srt.utils import set_weight_attrs
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
 
@@ -354,28 +358,23 @@ class BlockInt8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
+        self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
     def apply(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+    ) -> CombineInput:
 
-        x = dispatch_output.hidden_states
-        topk_output = dispatch_output.topk_output
-
-        # Expert fusion with INT8 quantization
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_output=topk_output,
-            moe_runner_config=self.moe_runner_config,
+        quant_info = TritonMoeQuantInfo(
+            w13_weight=layer.w13_weight,
+            w2_weight=layer.w2_weight,
             use_int8_w8a8=True,
-            w1_scale=(layer.w13_weight_scale_inv),
-            w2_scale=(layer.w2_weight_scale_inv),
+            w13_scale=layer.w13_weight_scale_inv,
+            w2_scale=layer.w2_weight_scale_inv,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             block_shape=self.quant_config.weight_block_size,
         )
+
+        return self.runner.run(dispatch_output, quant_info)

@@ -24,6 +24,8 @@ from sglang.srt.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from sglang.srt.layers.amx_utils import _amx_process_weight_after_loading
+from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
+from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.parameter import (
     ChannelQuantScaleParameter,
     ModelWeightParameter,
@@ -49,8 +51,10 @@ from sglang.srt.utils import (
 )
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
 
 _is_cuda = is_cuda()
 _is_cpu_amx_available = cpu_has_amx_support()
@@ -497,13 +501,14 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
+        self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
     def apply(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
     ) -> torch.Tensor:
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
@@ -515,7 +520,7 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             x, topk_weights = apply_topk_weights_cpu(
                 self.moe_runner_config.apply_router_weight_on_input, topk_weights, x
             )
-            return torch.ops.sgl_kernel.fused_experts_cpu(
+            output = torch.ops.sgl_kernel.fused_experts_cpu(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -531,20 +536,18 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
                 layer.w2_input_scale,  # a2_scale
                 True,  # is_vnni
             )
+            return StandardCombineInput(hidden_states=output)
 
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_output=topk_output,
-            moe_runner_config=self.moe_runner_config,
+        quant_info = TritonMoeQuantInfo(
+            w13_weight=layer.w13_weight,
+            w2_weight=layer.w2_weight,
             use_int8_w8a8=True,
             per_channel_quant=True,
-            w1_scale=(layer.w13_weight_scale),
-            w2_scale=(layer.w2_weight_scale),
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            w13_weight_scale=layer.w13_weight_scale,
+            w2_weight_scale=layer.w2_weight_scale,
+            w2_weight_bias=layer.w2_weight_bias,
         )
+        return self.runner.run(dispatch_output, quant_info)
 
 
 class NPU_W8A8LinearMethodImpl:
@@ -1006,14 +1009,16 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
         self,
         layer,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
 
         topk_weights, topk_ids, _ = topk_output
         topk_ids = topk_ids.to(torch.int32)
         topk_weights = topk_weights.to(x.dtype)
-        return npu_fused_experts(
+        output = npu_fused_experts(
             hidden_states=x,
             w13=layer.w13_weight,
             w13_scale=layer.w13_weight_scale,
@@ -1023,3 +1028,4 @@ class NPU_W8A8MoEMethod(FusedMoEMethodBase):
             topk_ids=topk_ids,
             top_k=topk_ids.shape[1],
         )
+        return StandardCombineInput(hidden_states=output)

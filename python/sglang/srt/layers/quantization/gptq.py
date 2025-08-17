@@ -45,7 +45,10 @@ from sglang.srt.layers.quantization.utils import (
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        StandardDispatchOutput,
+        CombineInput,
+    )
 
 from sglang.srt.utils import is_cuda
 
@@ -1056,7 +1059,9 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
@@ -1073,7 +1078,7 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
 
         topk_weights, topk_ids, router_logits = topk_output
 
-        return fused_marlin_moe(
+        output = fused_marlin_moe(
             x,
             layer.w13_qweight,
             layer.w2_qweight,
@@ -1089,3 +1094,4 @@ class GPTQMarlinMoEMethod(FusedMoEMethodBase):
             num_bits=self.quant_config.weight_bits,
             is_k_full=self.is_k_full,
         ).to(orig_dtype)
+        return StandardCombineInput(hidden_states=output)

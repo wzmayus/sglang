@@ -5,11 +5,11 @@ from typing import TYPE_CHECKING, NamedTuple
 import torch
 
 from sglang.srt.layers.moe.token_dispatcher.base import (
+    BaseDispatcher,
     CombineInput,
     CombineInputFormat,
     DispatchOutput,
     DispatchOutputFormat,
-    BaseDispatcher,
 )
 
 if TYPE_CHECKING:
@@ -44,8 +44,12 @@ assert isinstance(StandardCombineInput, CombineInput)
 
 
 class StandardDispatcher(BaseDispatcher):
-    def dispatch(self, hidden_states: torch.Tensor, topk_output: TopKOutput) -> DispatchOutput:
-        return StandardDispatchOutput(hidden_states=hidden_states, topk_output=topk_output)
+    def dispatch(
+        self, hidden_states: torch.Tensor, topk_output: TopKOutput
+    ) -> DispatchOutput:
+        return StandardDispatchOutput(
+            hidden_states=hidden_states, topk_output=topk_output
+        )
 
     def combine(self, combine_input: CombineInput) -> torch.Tensor:
         if isinstance(combine_input, StandardCombineInput):

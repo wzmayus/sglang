@@ -30,9 +30,9 @@ except ImportError:
 
 from sglang.srt.distributed import get_tensor_model_parallel_world_size
 from sglang.srt.layers.amx_utils import _amx_process_weight_after_loading
-from sglang.srt.layers.moe.moe_runner import MoeRunner, MoeRunnerConfig
+from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
+from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.moe.token_dispatcher.base import DispatchOutputChecker
-from sglang.srt.layers.moe.utils import MoeRunnerBackend
 from sglang.srt.layers.parameter import (
     BlockQuantScaleParameter,
     ModelWeightParameter,
@@ -83,6 +83,7 @@ from sglang.srt.utils import (
 
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
         DispatchOutput,
         StandardDispatchOutput,
     )
@@ -1007,7 +1008,9 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         dispatch_output: DispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         assert DispatchOutputChecker.format_is_standard(
             dispatch_output
@@ -1027,7 +1030,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 moe_runner_config.apply_router_weight_on_input, topk_weights, x
             )
 
-            return torch.ops.sgl_kernel.fused_experts_cpu(
+            output = torch.ops.sgl_kernel.fused_experts_cpu(
                 x,
                 layer.w13_weight,
                 layer.w2_weight,
@@ -1043,6 +1046,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 None,  # a2_scale
                 True,  # is_vnni
             )
+            return StandardCombineInput(hidden_states=output)
 
         if _is_hip:
             ret = self.maybe_apply_hip_fused_experts(
@@ -1053,7 +1057,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
                 moe_runner_config.no_combine,
             )
             if ret is not None:
-                return ret
+                return StandardCombineInput(hidden_states=ret)
 
         if (
             get_bool_env_var("SGLANG_CUTLASS_MOE")
@@ -1090,9 +1094,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             # TODO: Fuse into select_experts
             if moe_runner_config.routed_scaling_factor is not None:
                 output *= moe_runner_config.routed_scaling_factor
-            return output
-
-        from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
+            return StandardCombineInput(hidden_states=output)
 
         quant_info = TritonMoeQuantInfo(
             w13_weight=layer.w13_weight,

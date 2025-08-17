@@ -22,6 +22,8 @@ from typing import TYPE_CHECKING, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
+from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
+from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.moe.utils import get_moe_runner_backend
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -59,8 +61,10 @@ if is_flashinfer_available():
 logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
 
 _is_hip = is_hip()
 
@@ -612,13 +616,15 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
+        self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
     def apply(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
 
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
         from sglang.srt.layers.moe.topk import TopKOutputChecker
 
         x = dispatch_output.hidden_states
@@ -667,14 +673,14 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                 1,  # routing_method_type, renormalize
                 True,  # do finalize
             )[0]
-            return trtllm_gen_output
+            return StandardCombineInput(hidden_states=trtllm_gen_output)
 
         if self.use_triton_kernels:
             assert (
                 layer.moe_ep_size == 1
             ), "Expert parallel is not supported when using triton kernels"
             if self.with_bias:
-                return self.triton_kernel_moe_with_bias_forward(
+                output = self.triton_kernel_moe_with_bias_forward(
                     hidden_states=x,
                     w1=self.w13_weight_triton_tensor,
                     w1_pcg=self.w13_precision_config,
@@ -686,25 +692,22 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
                     moe_runner_config=moe_runner_config,
                 )
             else:
-                return self.triton_kernel_moe_forward(
+                output = self.triton_kernel_moe_forward(
                     hidden_states=x,
                     w1=layer.w13_weight,
                     w2=layer.w2_weight,
                     topk_output=topk_output,
                     moe_runner_config=moe_runner_config,
                 )
+            return StandardCombineInput(hidden_states=output)
         else:
-            from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
-
-            return fused_experts(
-                hidden_states=x,
-                w1=layer.w13_weight,
-                w2=layer.w2_weight,
-                topk_output=topk_output,
-                moe_runner_config=moe_runner_config,
-                b1=layer.w13_weight_bias,
-                b2=layer.w2_weight_bias,
+            quant_info = TritonMoeQuantInfo(
+                w13_weight=layer.w13_weight,
+                w2_weight=layer.w2_weight,
+                w13_weight_bias=layer.w13_weight_bias,
+                w2_weight_bias=layer.w2_weight_bias,
             )
+            return self.runner.run(dispatch_output, quant_info)
 
 
 class Mxfp4DynamicQuantMoEMethod(FusedMoEMethodBase):
@@ -802,13 +805,15 @@ class Mxfp4DynamicQuantMoEMethod(FusedMoEMethodBase):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
+
         x = dispatch_output.hidden_states
         topk_output = dispatch_output.topk_output
 
         topk_weights, topk_ids, _ = topk_output
 
-        return fused_moe(
+        output = fused_moe(
             x,
             layer.w13_weight,
             layer.w2_weight,
@@ -824,3 +829,4 @@ class Mxfp4DynamicQuantMoEMethod(FusedMoEMethodBase):
             ),
             doweight_stage1=False,
         )
+        return StandardCombineInput(hidden_states=output)

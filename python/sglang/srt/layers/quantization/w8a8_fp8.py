@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 import torch
 from torch.nn.parameter import Parameter
 
+from sglang.srt.layers.moe.moe_runner.triton import TritonMoeQuantInfo
 from sglang.srt.layers.parameter import ChannelQuantScaleParameter, ModelWeightParameter
 from sglang.srt.layers.quantization.base_config import (
     FusedMoEMethodBase,
@@ -26,8 +27,11 @@ from sglang.srt.layers.quantization.fp8_utils import (
 from sglang.srt.utils import set_weight_attrs
 
 if TYPE_CHECKING:
-    from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe import MoeRunner, MoeRunnerBackend, MoeRunnerConfig
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
 
 _is_fp8_fnuz = is_fp8_fnuz()
 
@@ -280,27 +284,22 @@ class W8A8FP8MoEMethod(FusedMoEMethodBase):
         self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
     ):
         self.moe_runner_config = moe_runner_config
+        self.runner = MoeRunner(MoeRunnerBackend.TRITON, moe_runner_config)
 
     def apply(
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
-        from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
+    ) -> CombineInput:
 
-        x = dispatch_output.hidden_states
-        topk_output = dispatch_output.topk_output
-
-        return fused_experts(
-            x,
-            layer.w13_weight,
-            layer.w2_weight,
-            topk_output=topk_output,
-            moe_runner_config=self.moe_runner_config,
+        quant_info = TritonMoeQuantInfo(
+            w13_weight=layer.w13_weight,
+            w2_weight=layer.w2_weight,
             use_fp8_w8a8=True,
             per_channel_quant=True,
-            w1_scale=(layer.w13_weight_scale),
-            w2_scale=(layer.w2_weight_scale),
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
             a1_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
         )
+        return self.runner.run(dispatch_output, quant_info)

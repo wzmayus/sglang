@@ -24,7 +24,10 @@ from sglang.srt.utils import is_cpu, is_cuda, is_hip, is_npu, set_weight_attrs
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.token_dispatcher import StandardDispatchOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
     from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
@@ -602,7 +605,9 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         self,
         layer: torch.nn.Module,
         dispatch_output: StandardDispatchOutput,
-    ) -> torch.Tensor:
+    ) -> CombineInput:
+
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         assert (
             self.moe_runner_config.activation == "silu"
@@ -613,7 +618,7 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
         topk_weights, topk_ids, router_logits = topk_output
 
-        return torch.ops.vllm.fused_marlin_moe(
+        output = torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
@@ -629,3 +634,4 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             is_k_full=self.is_k_full,
         )
+        return StandardCombineInput(hidden_states=output)
