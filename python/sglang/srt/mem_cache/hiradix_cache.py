@@ -186,6 +186,7 @@ class HiRadixCache(RadixCache):
                 start_node, end_node = self.ongoing_load_back[ack_id]
                 self.dec_lock_ref(end_node)
                 while end_node != start_node:
+                    end_node.loading = False
                     end_node = end_node.parent
                 # clear the reference
                 del self.ongoing_load_back[ack_id]
@@ -322,6 +323,7 @@ class HiRadixCache(RadixCache):
                 node, device_indices[offset : offset + len(node.host_value)]
             )
             offset += len(node.host_value)
+            node.loading = True
         self.inc_lock_ref(last_hit_node)
 
         return device_indices
@@ -748,3 +750,9 @@ class HiRadixCache(RadixCache):
                     if not cur_child.evicted:
                         stack.append(cur_child)
         return ret_list
+
+    def scheduling(self, reqs):
+        return [i for i in range(len(reqs))]
+
+    def insert_pending_request(self, node, req):
+        return

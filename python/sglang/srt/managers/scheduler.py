@@ -400,6 +400,7 @@ class Scheduler(
         self.running_batch: ScheduleBatch = ScheduleBatch(reqs=[], batch_is_full=False)
         # The current forward batch
         self.cur_batch: Optional[ScheduleBatch] = None
+        self.pending_batch: Optional[ScheduleBatch] = None
         # The last forward batch
         self.last_batch: Optional[ScheduleBatch] = None
         self.forward_ct = 0
@@ -1496,35 +1497,26 @@ class Scheduler(
                     # Merge running_batch with prefill batch
                     self.running_batch.merge_batch(self.last_batch)
 
-        new_batch = self.get_new_batch_prefill()
-
-        need_dp_attn_preparation = require_mlp_sync(self.server_args)
-
-        if need_dp_attn_preparation and not self.spec_algorithm.is_none():
-            # In speculative decoding, prefill batches and decode batches cannot be processed in the same DP attention group.
-            # We prepare idle batches in advance to skip preparing decode batches when there are prefill batches in the group.
-            new_batch = self.prepare_mlp_sync_batch(new_batch)
-            need_dp_attn_preparation = new_batch is None
-
-        if new_batch is not None:
-            # Run prefill first if possible
-            ret = new_batch
+        if self.pending_batch is not None:
+            ret = self.pending_batch
+            self.pending_batch = None
         else:
             # Run decode
-            if not self.running_batch.is_empty():
+            new_batch = self.get_new_batch_prefill()
+            if new_batch is None:
                 self.running_batch = self.update_running_batch(self.running_batch)
                 ret = self.running_batch if not self.running_batch.is_empty() else None
             else:
-                ret = None
-
-        # Handle DP attention
-        if need_dp_attn_preparation:
-            if (
-                self.server_args.load_balance_method == "minimum_tokens"
-                and self.forward_ct % 40 == 0
-            ):
-                self.handle_dp_balance_data(ret)
-            ret = self.prepare_mlp_sync_batch(ret)
+                if new_batch.is_loading_bound:
+                    self.running_batch = self.update_running_batch(self.running_batch)
+                    if self.running_batch.is_empty():
+                        ret = new_batch
+                    else:
+                        # delay the new batch to overlap KV cache loading with decode batch
+                        ret = self.running_batch
+                        self.pending_batch = new_batch
+                else:
+                    ret = new_batch
 
         return ret
 
@@ -1581,7 +1573,8 @@ class Scheduler(
             lora_set = set([req.lora_id for req in self.running_batch.reqs])
 
         # Get requests from the waiting queue to a new prefill batch
-        for req in self.waiting_queue:
+        def process_req(req: Req, prefix_computed: bool = False) -> bool:
+            # for req in self.waiting_queue:
 
             if self.enable_lora and not self.tp_worker.can_run_lora_batch(
                 lora_set
@@ -1589,24 +1582,19 @@ class Scheduler(
                 | set([req.lora_id])
             ):
                 self.running_batch.batch_is_full = True
-                break
+                return False
 
             if len(adder.can_run_list) >= self.get_num_allocatable_reqs(running_bs):
                 self.running_batch.batch_is_full = True
-                break
-
-            if self.disaggregation_mode == DisaggregationMode.PREFILL:
-                # In prefill mode, prealloc queue and transfer queue can also take memory,
-                # so we need to check if the available size for the actual available size.
-                if len(adder.can_run_list) >= self.req_to_token_pool.available_size():
-                    self.running_batch.batch_is_full = True
-                    break
+                return False
 
             if self.enable_hicache_storage:
                 prefetch_done = self.tree_cache.check_prefetch_progress(req.rid)
                 if not prefetch_done:
+                    # todo
+                    pass
                     # skip staging requests that are ongoing prefetch
-                    continue
+                    # continue
 
             req.init_next_round_input(self.tree_cache)
             res = adder.add_one_req(req, has_chunked_req=(self.chunked_req is not None))
@@ -1620,7 +1608,21 @@ class Scheduler(
                         ) > 0 or (not self.running_batch.is_empty())
                     else:
                         self.running_batch.batch_is_full = True
-                break
+                return False
+            return True
+
+        if self.chunked_req is not None:
+            # skip iterating over the waiting queue
+            pass
+        else:
+            reordered_indices = self.tree_cache.scheduling(
+                [req.origin_input_ids for req in self.waiting_queue]
+            )
+
+            for i in reordered_indices:
+                assert i < len(self.waiting_queue) and reordered_indices.count(i) == 1
+                if not process_req(self.waiting_queue[i], False):
+                    break
 
         # Update waiting queue
         can_run_list: List[Req] = adder.can_run_list
@@ -1659,13 +1661,44 @@ class Scheduler(
             self.server_args.enable_custom_logit_processor,
             chunked_req=self.chunked_req,
         )
+
+        is_loading_bound = False
         if self.enable_hierarchical_cache:
             # todo (zhiqiang): disable cuda graph execution if hicache loading triggered
             new_batch.hicache_consumer_index = (
                 self.tree_cache.ready_to_load_host_cache()
             )
+            hit = to_load = real_load = to_compute = 0
+            loading_nodes = set()
+            for r in can_run_list:
+                # keep track of ongoing requests for delay hit
+                node = r.last_node
+                self.tree_cache.insert_pending_request(
+                    node, r.origin_input_ids[len(r.prefix_indices) :]
+                )
+                r_load = 0
+                while node.loading:
+                    r_load += len(node.value)
+                    if node.id not in loading_nodes:
+                        real_load += len(node.value)
+                        loading_nodes.add(node.id)
+                    node = node.parent
+                hit += len(r.prefix_indices) - r_load
+                to_load += r_load
+                to_compute += r.extend_input_len
+            if (
+                (real_load > 40000 and real_load / to_compute > 50)
+                or (real_load > 20000 and real_load / to_compute > 100)
+                or (real_load > 10000 and real_load / to_compute > 200)
+            ):
+                is_loading_bound = True
+                logger.info(f"Loading bound detected: {real_load=}, {to_compute=}")
+            logger.info(
+                f"for the current batch: {to_load=}, {real_load=}, {to_compute=}, {hit=}, queue: {len(self.waiting_queue)}"
+            )
 
         new_batch.prepare_for_extend()
+        new_batch.is_loading_bound = is_loading_bound
 
         # Mixed-style chunked prefill
         if (

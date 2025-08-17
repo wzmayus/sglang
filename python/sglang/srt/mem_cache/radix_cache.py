@@ -53,6 +53,7 @@ class TreeNode:
         self.last_access_time = time.monotonic()
 
         self.hit_count = 0
+        self.loading = False
         # indicating the node is locked to protect from eviction
         # incremented when the node is referenced by a storage operation
         self.host_ref_counter = 0

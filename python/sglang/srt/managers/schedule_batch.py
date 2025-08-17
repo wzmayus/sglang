@@ -917,6 +917,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
 
     # hicache pointer for synchronizing data loading from CPU to GPU
     hicache_consumer_index: int = 0
+    is_loading_bound: bool = False
 
     @classmethod
     def init_new(

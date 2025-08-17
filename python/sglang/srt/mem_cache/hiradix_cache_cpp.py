@@ -132,3 +132,15 @@ class HiRadixCacheCpp(HiRadixCache):
             node,
             new_indices,
         )
+
+    def insert_pending_request(
+        self,
+        node: TreeNode,
+        key: List[int],
+    ):
+        self.hiradix_core.insert_pending_request(node, key)
+
+    def scheduling(self, requests):
+        return self.hiradix_core.scheduling(
+            requests,
+        )
