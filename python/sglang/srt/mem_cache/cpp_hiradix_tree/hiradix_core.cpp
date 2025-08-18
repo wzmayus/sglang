@@ -194,13 +194,14 @@ public:
     int64_t hit_device_len = 0;
     int64_t hit_host_len = 0;
 
-    while (last_node) {
-      if (last_node->evicted() || last_node->lock_ref == 0) {
-        hit_host_len += last_node->host_value.size(0);
+    TreeNode *ref_node = last_node;
+    while (!ref_node->is_root()) {
+      if (ref_node->evicted() || ref_node->lock_ref == 0) {
+        hit_host_len += ref_node->host_value.size(0);
       } else {
-        hit_device_len += last_node->value.numel();
+        hit_device_len += ref_node->value.size(0);
       }
-      last_node = last_node->parent;
+      ref_node = ref_node->parent;
     }
     int64_t to_compute_len = key.size() - hit_device_len - hit_host_len;
 
@@ -557,26 +558,28 @@ public:
         ckey = child_key_from(key);
     }
 
-    std::vector<std::vector<int64_t>> new_pending_requests;
-    for (size_t idx = 0; idx < node->pending_requests.size();) {
-      auto &req = node->pending_requests[idx];
-      int64_t key_match_len = key_match(req, key);
-      if (key_match_len == req.size()) {
-        // This request matches the current key
-        req.erase(req.begin(), req.begin() + key.size());
-        new_pending_requests.push_back(std::move(req));
-        node->pending_requests.erase(node->pending_requests.begin() + idx);
-      } else {
-        if (req.size() - key_match_len < CACHE_THRESHOLD) {
-          // This request is too short to be useful, remove it
+    if (!key.empty()) {
+
+      std::vector<std::vector<int64_t>> new_pending_requests;
+      for (size_t idx = 0; idx < node->pending_requests.size();) {
+        auto &req = node->pending_requests[idx];
+        int64_t key_match_len = key_match(req, key);
+        if (key_match_len == key.size()) {
+          // Finished request matches the pending request
+          req.erase(req.begin(), req.begin() + key.size());
+          new_pending_requests.push_back(std::move(req));
           node->pending_requests.erase(node->pending_requests.begin() + idx);
         } else {
-          idx++;
+          if (req.size() - key_match_len < CACHE_THRESHOLD) {
+            // The remaining request is too short to be useful, remove it
+            node->pending_requests.erase(node->pending_requests.begin() + idx);
+          } else {
+            // todo, should split but leave it for later
+            idx++;
+          }
         }
       }
-    }
 
-    if (!key.empty()) {
       // Create new child with remaining key/value
       new_node = make_node();
       new_node->parent = node;
@@ -733,7 +736,6 @@ private:
       auto it = node->children.find(ckey);
       if (it == node->children.end()) {
         if (node->pending_requests.size() > 0) {
-          // If no child matches, insert pending requests
           for (const auto &req : node->pending_requests) {
             int64_t matched_len = key_match(req, rem);
             pending_hit_len = std::max(pending_hit_len, matched_len);

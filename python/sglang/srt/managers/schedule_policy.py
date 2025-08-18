@@ -522,9 +522,12 @@ class PrefillAdder:
                 new_indices, req.last_node = self.tree_cache.init_load_back(
                     req.last_host_node, req.host_hit_length
                 )
+                req.hicache_to_load_from_host = len(new_indices)
                 req.prefix_indices = torch.cat([req.prefix_indices, new_indices])
                 req.extend_input_len = len(req.fill_ids) - len(req.prefix_indices)
                 prefix_len = len(req.prefix_indices)
+            else:
+                req.hicache_to_load_from_host = 0
 
             input_tokens = self.ceil_paged_tokens(req.extend_input_len)
 

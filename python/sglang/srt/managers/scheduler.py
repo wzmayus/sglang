@@ -1608,7 +1608,8 @@ class Scheduler(
                         ) > 0 or (not self.running_batch.is_empty())
                     else:
                         self.running_batch.batch_is_full = True
-                return False
+                    # keep trying to add requests till the batch is full
+                    return False
             return True
 
         if self.chunked_req is not None:
@@ -1668,23 +1669,14 @@ class Scheduler(
             new_batch.hicache_consumer_index = (
                 self.tree_cache.ready_to_load_host_cache()
             )
-            hit = to_load = real_load = to_compute = 0
-            loading_nodes = set()
+            real_load = to_compute = 0
             for r in can_run_list:
                 # keep track of ongoing requests for delay hit
                 node = r.last_node
                 self.tree_cache.insert_pending_request(
                     node, r.origin_input_ids[len(r.prefix_indices) :]
                 )
-                r_load = 0
-                while node.loading:
-                    r_load += len(node.value)
-                    if node.id not in loading_nodes:
-                        real_load += len(node.value)
-                        loading_nodes.add(node.id)
-                    node = node.parent
-                hit += len(r.prefix_indices) - r_load
-                to_load += r_load
+                real_load += r.hicache_to_load_from_host
                 to_compute += r.extend_input_len
             if (
                 (real_load > 40000 and real_load / to_compute > 50)
@@ -1693,9 +1685,6 @@ class Scheduler(
             ):
                 is_loading_bound = True
                 logger.info(f"Loading bound detected: {real_load=}, {to_compute=}")
-            logger.info(
-                f"for the current batch: {to_load=}, {real_load=}, {to_compute=}, {hit=}, queue: {len(self.waiting_queue)}"
-            )
 
         new_batch.prepare_for_extend()
         new_batch.is_loading_bound = is_loading_bound

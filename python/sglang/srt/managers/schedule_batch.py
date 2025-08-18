@@ -620,6 +620,8 @@ class Req:
         self.tmp_end_idx: int = -1
         self.metadata_buffer_index: int = -1
 
+        self.hicache_to_load_from_host = 0
+
     @property
     def seqlen(self):
         return len(self.origin_input_ids) + len(self.output_ids)
