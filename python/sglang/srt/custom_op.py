@@ -32,15 +32,10 @@ class CustomOp(nn.Module):
         # The performance of torch.compile on this layer is not always good when bs > 1,
         # so we decide to only use torch.compile when bs=1
         if "FusedMoE" in self.__class__.__name__:
-            if num_tokens == 1:
-                from sglang.srt.layers.moe.fused_moe_native import (
-                    fused_moe_forward_native,
-                )
-
-                self._forward_method = fused_moe_forward_native
-        elif "TopK" in self.__class__.__name__:
-            if num_tokens == 1:
-                self._forward_method = self.forward_native
+            from sglang.srt.layers.moe.fused_moe_native import (
+                fused_moe_forward_native,
+            )
+            self._forward_method = fused_moe_forward_native
         else:
             self._forward_method = self.forward_native
         self.is_torch_compile = True
