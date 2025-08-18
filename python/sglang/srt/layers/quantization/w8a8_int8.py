@@ -543,9 +543,10 @@ class W8A8Int8MoEMethod(FusedMoEMethodBase):
             w2_weight=layer.w2_weight,
             use_int8_w8a8=True,
             per_channel_quant=True,
-            w13_weight_scale=layer.w13_weight_scale,
-            w2_weight_scale=layer.w2_weight_scale,
-            w2_weight_bias=layer.w2_weight_bias,
+            w13_scale=layer.w13_weight_scale,
+            w2_scale=layer.w2_weight_scale,
+            a13_scale=layer.w13_input_scale,
+            a2_scale=layer.w2_input_scale,
         )
         return self.runner.run(dispatch_output, quant_info)
 
