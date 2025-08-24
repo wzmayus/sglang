@@ -105,23 +105,23 @@ class MoeRunnerCore(ABC):
 
 class FusedOpPool:
 
-    _fused_ops: dict[str, Callable] = {}
+    _fused_funcs: dict[str, Callable] = {}
 
     @classmethod
     def register_fused_func(
         cls, dispatch_name: str, runner_name: str, fused_func: Callable
     ):
         key = (dispatch_name, runner_name)
-        if key in cls._fused_ops:
+        if key in cls._fused_funcs:
             raise ValueError(
                 f"Fused function for {dispatch_name} to {runner_name} is already registered."
             )
-        cls._fused_ops[key] = fused_func
+        cls._fused_funcs[key] = fused_func
 
     @classmethod
     def get_fused_func(cls, dispatch_name: str, runner_name: str) -> Optional[Callable]:
         key = (dispatch_name, runner_name)
-        fused_func = cls._fused_ops.get(key)
+        fused_func = cls._fused_funcs.get(key)
         return fused_func
 
 

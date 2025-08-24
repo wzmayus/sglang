@@ -330,10 +330,10 @@ def fused_experts_standard_to_triton(
     dispatch_output: StandardDispatchOutput,
     quant_info: TritonMoeQuantInfo,
     runner_config: MoeRunnerConfig,
-) -> TritonRunnerOutput:
+) -> StandardCombineInput:
     from sglang.srt.layers.moe.fused_moe_triton.fused_moe import fused_experts
 
-    return fused_experts(
+    output = fused_experts(
         hidden_states=dispatch_output.hidden_states,
         w1=quant_info.w13_weight,
         w2=quant_info.w2_weight,
@@ -353,6 +353,10 @@ def fused_experts_standard_to_triton(
         a1_scale=quant_info.a13_scale,
         a2_scale=quant_info.a2_scale,
         block_shape=quant_info.block_shape,
+    )
+
+    return StandardCombineInput(
+        hidden_states=output,
     )
 
 
