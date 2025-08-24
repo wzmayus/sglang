@@ -31,7 +31,10 @@ from sglang.srt.utils import (
 if TYPE_CHECKING:
     from sglang.srt.layers.moe.fused_moe_triton import FusedMoE
     from sglang.srt.layers.moe.moe_runner import MoeRunnerConfig
-    from sglang.srt.layers.moe.topk import TopKOutput
+    from sglang.srt.layers.moe.token_dispatcher import (
+        CombineInput,
+        StandardDispatchOutput,
+    )
     from sglang.srt.layers.quantization.compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
     )
@@ -293,14 +296,22 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 )
                 torch.cuda.empty_cache()
 
+    def create_moe_runner(
+        self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
+    ):
+        self.moe_runner_config = moe_runner_config
+
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_output: TopKOutput,
-        moe_runner_config: MoeRunnerConfig,
+        dispatch_output: StandardDispatchOutput,
     ) -> torch.Tensor:
         from sglang.srt.layers.moe.fused_moe_triton import fused_experts
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
+
+        moe_runner_config = self.moe_runner_config
 
         if (
             _use_aiter
@@ -380,8 +391,6 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             params_dtype == torch.float16
         ), "float16 is required for MoE compressed models. Set dtype=torch.float16"  # noqa: E501
 
-        intermediate_size_full = extra_weight_attrs.pop("intermediate_size_full")
-
         # Will transpose the loaded weight along the
         # intermediate and hidden dim sizes. Will
         # shard for TP along the transposed dims
@@ -415,13 +424,13 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         # In the case where we have actorder/g_idx,
         # we do not partition the w2 scales
         load_full_w2 = self.actorder and self.group_size != -1
-        w2_scales_size = (
-            intermediate_size_full if load_full_w2 else intermediate_size_per_partition
-        )
 
-        self.is_k_full = (not self.actorder) or (
-            intermediate_size_per_partition == intermediate_size_full
-        )
+        if load_full_w2:
+            w2_scales_size = intermediate_size_per_partition * layer.moe_tp_size
+        else:
+            w2_scales_size = intermediate_size_per_partition
+
+        self.is_k_full = (not self.actorder) or layer.moe_tp_size == 1
 
         if self.strategy == "channel":
             num_groups_w2 = num_groups_w13 = 1
@@ -640,21 +649,29 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         )
         replace_tensor("w2_weight_scale", marlin_w2_scales)
 
+    def create_moe_runner(
+        self, layer: torch.nn.Module, moe_runner_config: MoeRunnerConfig
+    ):
+        self.moe_runner_config = moe_runner_config
+
     def apply(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
-        topk_output: TopKOutput,
-        moe_runner_config: MoeRunnerConfig,
-    ) -> torch.Tensor:
+        dispatch_output: StandardDispatchOutput,
+    ) -> CombineInput:
+
+        from sglang.srt.layers.moe.token_dispatcher import StandardCombineInput
 
         assert (
-            moe_runner_config.activation == "silu"
+            self.moe_runner_config.activation == "silu"
         ), "Only SiLU activation is supported."
+
+        x = dispatch_output.hidden_states
+        topk_output = dispatch_output.topk_output
 
         topk_weights, topk_ids, router_logits = topk_output
 
-        return torch.ops.vllm.fused_marlin_moe(
+        output = torch.ops.vllm.fused_marlin_moe(
             x,
             layer.w13_weight_packed,
             layer.w2_weight_packed,
@@ -670,3 +687,4 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
             num_bits=self.num_bits,
             is_k_full=self.is_k_full,
         )
+        return StandardCombineInput(hidden_states=output)
