@@ -21,6 +21,9 @@ class MoeRunner:
         self.runner_backend = runner_backend
         self.config = config
 
+        self.pre_permute_func = None
+        self.post_permute_func = None
+
         if runner_backend.is_triton():
             self.runner_core = TritonRunnerCore(config)
         else:
@@ -29,27 +32,32 @@ class MoeRunner:
     def run(
         self, dispatch_output: DispatchOutput, quant_info: MoeQuantInfo
     ) -> CombineInput:
-
-        # TODO: we may cache the pre_permute_func and post_permute_func
-
-        dispatch_output_format = dispatch_output.format
-        runner_input_format = self.runner_core.input_format
-        pre_permute_func = PermuteMethodPool.get_pre_permute(
-            dispatch_output_format, runner_input_format
-        )
+        
+        if self.pre_permute_func is None:
+            dispatch_format = dispatch_output.format.value
+            runner_format = self.runner_core.input_format.value
+            self.pre_permute_func = PermuteMethodPool.get_pre_permute(
+                dispatch_format, runner_format
+            )
 
         running_state = {}
-        runner_input = pre_permute_func(
+        runner_input = self.pre_permute_func(
             dispatch_output, quant_info, self.config, running_state
         )
         runner_output = self.runner_core.run(runner_input, quant_info, running_state)
 
-        runner_output_format = self.runner_core.output_format
-        combine_input_format = CombineInputFormat.STANDARD
-        post_permute_func = PermuteMethodPool.get_post_permute(
-            runner_output_format, combine_input_format
-        )
-        combine_input = post_permute_func(
+        # from sglang.srt.layers.moe.moe_runner.triton import TritonRunnerOutput
+        # runner_output = TritonRunnerOutput(
+        #     hidden_states=dispatch_output.hidden_states,
+        # )
+
+        if self.post_permute_func is None:
+            runner_format = self.runner_core.output_format.value
+            combine_format = dispatch_output.format.value
+            self.post_permute_func = PermuteMethodPool.get_post_permute(
+                runner_format, combine_format
+            )
+        combine_input = self.post_permute_func(
             runner_output, quant_info, self.config, running_state
         )
 

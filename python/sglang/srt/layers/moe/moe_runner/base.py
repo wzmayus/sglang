@@ -126,10 +126,7 @@ class PermuteMethodPool:
         :param runner_input_name: The RunnerInputFormat name.
         :param permute_func: The permute function to register.
         """
-        key = (
-            DispatchOutputFormat(dispatch_output_name),
-            RunnerInputFormat(runner_input_name),
-        )
+        key = (dispatch_output_name, runner_input_name)
         if key in cls._pre_permute_methods:
             raise ValueError(
                 f"Pre-permute method for {dispatch_output_name} to {runner_input_name} is already registered."
@@ -150,10 +147,7 @@ class PermuteMethodPool:
         :param combine_input_name: The CombineInputFormat name.
         :param permute_func: The permute function to register.
         """
-        key = (
-            RunnerOutputFormat(runner_output_name),
-            CombineInputFormat(combine_input_name),
-        )
+        key = (runner_output_name, combine_input_name)
         if key in cls._post_permute_methods:
             raise ValueError(
                 f"Post-permute method for {runner_output_name} to {combine_input_name} is already registered."
@@ -174,7 +168,9 @@ class PermuteMethodPool:
         :return: The registered permute function or None if not found.
         """
         key = (dispatch_output_format, runner_input_format)
-        return cls._pre_permute_methods.get(key)
+        pre_permute_func = cls._pre_permute_methods.get(key)
+        assert pre_permute_func is not None, f"Pre-permute function for {dispatch_output_format} to {runner_input_format} is not registered"
+        return pre_permute_func
 
     @classmethod
     def get_post_permute(
@@ -190,7 +186,9 @@ class PermuteMethodPool:
         :return: The registered permute function or None if not found.
         """
         key = (runner_output_format, combine_input_format)
-        return cls._post_permute_methods.get(key)
+        post_permute_func = cls._post_permute_methods.get(key)
+        assert post_permute_func is not None, f"Post-permute function for {runner_output_format} to {combine_input_format} is not registered"
+        return post_permute_func
 
 
 def register_pre_permute(
