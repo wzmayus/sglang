@@ -103,6 +103,28 @@ class MoeRunnerCore(ABC):
         pass
 
 
+class FusedOpPool:
+
+    _fused_ops: dict[str, Callable] = {}
+
+    @classmethod
+    def register_fused_func(
+        cls, dispatch_name: str, runner_name: str, fused_func: Callable
+    ):
+        key = (dispatch_name, runner_name)
+        if key in cls._fused_ops:
+            raise ValueError(
+                f"Fused function for {dispatch_name} to {runner_name} is already registered."
+            )
+        cls._fused_ops[key] = fused_func
+
+    @classmethod
+    def get_fused_func(cls, dispatch_name: str, runner_name: str) -> Optional[Callable]:
+        key = (dispatch_name, runner_name)
+        fused_func = cls._fused_ops.get(key)
+        return fused_func
+
+
 class PermuteMethodPool:
 
     _pre_permute_methods: dict[
@@ -169,7 +191,9 @@ class PermuteMethodPool:
         """
         key = (dispatch_output_format, runner_input_format)
         pre_permute_func = cls._pre_permute_methods.get(key)
-        assert pre_permute_func is not None, f"Pre-permute function for {dispatch_output_format} to {runner_input_format} is not registered"
+        assert (
+            pre_permute_func is not None
+        ), f"Pre-permute function for {dispatch_output_format} to {runner_input_format} is not registered"
         return pre_permute_func
 
     @classmethod
@@ -187,8 +211,30 @@ class PermuteMethodPool:
         """
         key = (runner_output_format, combine_input_format)
         post_permute_func = cls._post_permute_methods.get(key)
-        assert post_permute_func is not None, f"Post-permute function for {runner_output_format} to {combine_input_format} is not registered"
+        assert (
+            post_permute_func is not None
+        ), f"Post-permute function for {runner_output_format} to {combine_input_format} is not registered"
         return post_permute_func
+
+
+def register_fused_func(
+    dispatch_name: str,
+    runner_name: str,
+) -> Callable:
+    """
+    Decorator to register a fused function for the given DispatchOutputFormat and RunnerInputFormat.
+
+    :param dispatch_name: The DispatchOutputFormat name.
+    :param runner_name: The RunnerInputFormat name.
+    :param fused_func: The fused function to register.
+    :return: The decorator function.
+    """
+
+    def decorator(fused_func: Callable):
+        FusedOpPool.register_fused_func(dispatch_name, runner_name, fused_func)
+        return fused_func
+
+    return decorator
 
 
 def register_pre_permute(

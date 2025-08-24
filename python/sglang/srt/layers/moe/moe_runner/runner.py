@@ -2,7 +2,11 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from sglang.srt.layers.moe.moe_runner.base import MoeRunnerConfig, PermuteMethodPool
+from sglang.srt.layers.moe.moe_runner.base import (
+    FusedOpPool,
+    MoeRunnerConfig,
+    PermuteMethodPool,
+)
 from sglang.srt.layers.moe.moe_runner.triton import TritonRunnerCore
 from sglang.srt.layers.moe.token_dispatcher.base import (
     CombineInput,
@@ -21,6 +25,7 @@ class MoeRunner:
         self.runner_backend = runner_backend
         self.config = config
 
+        self.fused_func = None
         self.pre_permute_func = None
         self.post_permute_func = None
 
@@ -32,7 +37,15 @@ class MoeRunner:
     def run(
         self, dispatch_output: DispatchOutput, quant_info: MoeQuantInfo
     ) -> CombineInput:
-        
+
+        if self.fused_func is None:
+            dispatch_format = dispatch_output.format.value
+            runner_format = self.runner_core.input_format.value
+            self.fused_func = FusedOpPool.get_fused_func(dispatch_format, runner_format)
+
+        if self.fused_func is not None:
+            return self.fused_func(dispatch_output, quant_info, self.config)
+
         if self.pre_permute_func is None:
             dispatch_format = dispatch_output.format.value
             runner_format = self.runner_core.input_format.value
@@ -45,11 +58,6 @@ class MoeRunner:
             dispatch_output, quant_info, self.config, running_state
         )
         runner_output = self.runner_core.run(runner_input, quant_info, running_state)
-
-        # from sglang.srt.layers.moe.moe_runner.triton import TritonRunnerOutput
-        # runner_output = TritonRunnerOutput(
-        #     hidden_states=dispatch_output.hidden_states,
-        # )
 
         if self.post_permute_func is None:
             runner_format = self.runner_core.output_format.value
