@@ -50,14 +50,7 @@ FetchContent_Declare(
 )
 FetchContent_Populate(repo-cutlass)
 
-FetchContent_Declare(
-    repo-fmt
-    GIT_REPOSITORY https://github.com/fmtlib/fmt
-    GIT_TAG        553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28
-    GIT_SHALLOW    OFF
-)
-FetchContent_Populate(repo-fmt)
-
+# DeepGemm
 FetchContent_Declare(
     repo-deepgemm
     GIT_REPOSITORY https://github.com/sgl-project/DeepGEMM
@@ -65,6 +58,14 @@ FetchContent_Declare(
     GIT_SHALLOW    OFF
 )
 FetchContent_Populate(repo-deepgemm)
+
+FetchContent_Declare(
+    repo-fmt
+    GIT_REPOSITORY https://github.com/fmtlib/fmt
+    GIT_TAG        553ec11ec06fbe0beebfbb45f9dc3c9eabd83d28
+    GIT_SHALLOW    OFF
+)
+FetchContent_Populate(repo-fmt)
 
 # Triton
 FetchContent_Declare(
