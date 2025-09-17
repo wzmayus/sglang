@@ -50,6 +50,7 @@ from sglang.srt.model_loader.weight_utils import (
     kv_cache_scales_loader,
 )
 from sglang.srt.utils import add_prefix, make_layers
+from sglang.srt.utils.hidden_states_logger import hidden_states_logger
 
 Qwen2Config = None
 
@@ -319,6 +320,15 @@ class Qwen2Model(nn.Module):
         input_embeds: torch.Tensor = None,
         pp_proxy_tensors: Optional[PPProxyTensors] = None,
     ) -> Union[torch.Tensor, PPProxyTensors]:
+        # Log batch information
+        batch_size = getattr(forward_batch, 'batch_size', 'unknown')
+        seq_len = input_ids.shape[-1] if input_ids is not None else 'unknown'
+        hidden_states_logger.log_batch_info(
+            f"Model forward - batch_size: {batch_size}, seq_len: {seq_len}, "
+            f"input_ids_shape: {input_ids.shape if input_ids is not None else 'None'}, "
+            f"positions_shape: {positions.shape}"
+        )
+        
         if self.pp_group.is_first_rank:
             if input_embeds is None:
                 hidden_states = self.embed_tokens(input_ids)

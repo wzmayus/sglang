@@ -31,6 +31,7 @@ from sglang.srt.model_loader.weight_utils import (
 from sglang.srt.models.qwen2 import Qwen2MLP as Qwen3MLP
 from sglang.srt.models.qwen2 import Qwen2Model
 from sglang.srt.utils import add_prefix, is_cuda
+from sglang.srt.utils.hidden_states_logger import hidden_states_logger
 
 Qwen3Config = None
 
@@ -172,6 +173,7 @@ class Qwen3DecoderLayer(nn.Module):
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
+        self.layer_id = layer_id
         rope_theta = getattr(config, "rope_theta", 1000000)
         rope_scaling = getattr(config, "rope_scaling", None)
         max_position_embeddings = getattr(config, "max_position_embeddings", 32768)
@@ -222,6 +224,14 @@ class Qwen3DecoderLayer(nn.Module):
         forward_batch: ForwardBatch,
         residual: Optional[torch.Tensor],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+        # Log input hidden states
+        input_states = hidden_states + residual if residual is not None else hidden_states
+        hidden_states_logger.log_hidden_states(
+            input_states, self.layer_id, "input", 
+            batch_size=getattr(forward_batch, 'batch_size', None),
+            extra_info=f"shape={input_states.shape}"
+        )
+        
         # Self Attention
         hidden_states, residual = self.layer_communicator.prepare_attn(
             hidden_states, residual, forward_batch
@@ -232,6 +242,14 @@ class Qwen3DecoderLayer(nn.Module):
                 hidden_states=hidden_states,
                 forward_batch=forward_batch,
             )
+        
+        # Log attention output
+        attn_output = hidden_states + residual if residual is not None else hidden_states
+        hidden_states_logger.log_hidden_states(
+            attn_output, self.layer_id, "attention_output",
+            batch_size=getattr(forward_batch, 'batch_size', None),
+            extra_info=f"shape={attn_output.shape}"
+        )
 
         # Fully Connected
         hidden_states, residual = self.layer_communicator.prepare_mlp(
@@ -241,6 +259,15 @@ class Qwen3DecoderLayer(nn.Module):
         hidden_states, residual = self.layer_communicator.postprocess_layer(
             hidden_states, residual, forward_batch
         )
+        
+        # Log final layer output
+        final_output = hidden_states + residual if residual is not None else hidden_states
+        hidden_states_logger.log_hidden_states(
+            final_output, self.layer_id, "output",
+            batch_size=getattr(forward_batch, 'batch_size', None),
+            extra_info=f"shape={final_output.shape}"
+        )
+        
         return hidden_states, residual
 
 
