@@ -22,10 +22,19 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from functools import reduce
 from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
+from torch import nn
+
+from sglang.semi_pd.utils import (
+    InstanceRole,
+    IPCInfo,
+    convert_ipc_handle_to_tensor,
+    get_ipc_handle,
+)
 
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig
@@ -181,6 +190,8 @@ class ModelRunner:
         is_draft_worker: bool = False,
         req_to_token_pool: Optional[ReqToTokenPool] = None,
         token_to_kv_pool_allocator: Optional[BaseTokenToKVPoolAllocator] = None,
+        bypass_load_weight: bool = False,
+        instance_role: InstanceRole = InstanceRole.OTHER,
     ):
         # Parse args
         self.mem_fraction_static = mem_fraction_static
@@ -212,6 +223,8 @@ class ModelRunner:
         self.use_mla_backend = self.model_config.attention_arch == AttentionArch.MLA
         self.attention_chunk_size = model_config.attention_chunk_size
         self.forward_pass_id = 0
+        self.bypass_load_weight = bypass_load_weight
+        self.instance_role = instance_role
 
         # Apply the rank zero filter to logger
         if not any(isinstance(f, RankZeroFilter) for f in logger.filters):
@@ -258,6 +271,11 @@ class ModelRunner:
         self._model_update_group = {}
 
     def initialize(self, min_per_gpu_memory: float):
+        """
+        Semi-PD:
+        - skip attn and cuda graph init for standalone instances
+        - delay attn and cuda graph init for P & D instances
+        """
         server_args = self.server_args
 
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -382,8 +400,12 @@ class ModelRunner:
         )
         if self.device == "cuda":
             self.init_cublas()
-            self.init_attention_backend()
-            self.init_device_graphs()
+            self.graph_runner = None
+            self.graph_mem_usage = 0
+            if not self.server_args.enable_semi_pd:
+                # Semi-PD
+                self.init_attention_backend()
+                self.init_device_graphs()
         elif self.device in ["npu", "cpu"]:
             self.init_attention_backend()
             self.init_device_graphs()
@@ -692,11 +714,297 @@ class ModelRunner:
         )
         return min_per_gpu_memory
 
-    def load_model(self):
-        before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
-        logger.info(
-            f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+    def get_ipc_info(self) -> IPCInfo:
+        def check_duplicate_handle(handle_to_name_, handle_, name_):
+            hashed = tuple(handle_[0]), handle_[1]
+            if handle_to_name_.get(hashed, None) is not None and handle_ != "BYPASS":
+                logger.warning(
+                    f"Duplicate handle found, {handle_to_name_[hashed]} and {name_}"
+                )
+            handle_to_name_[hashed] = name_
+
+        assert not self.bypass_load_weight
+
+        handle_to_name = {}
+        tensor_info = {}
+        weight_handles = {}
+        register_buffer_handles = {}
+
+        # Get Parameter Handles
+        source_params = dict(self.model.named_parameters())
+        for name, _ in self.model.named_parameters():
+            # Get the path to the parameter
+            path = name.split(".")
+
+            # Navigate to the parent module
+            module = self.model
+            for p in path[:-1]:
+                if p.isdigit():
+                    module = module[int(p)]
+                else:
+                    module = getattr(module, p)
+            # Create a parameter that shares storage with source parameter
+            source_param = source_params[name]
+            param_tensor = source_param.view_as(source_param)
+
+            # Bypass empty parameter
+            if param_tensor.numel() == 0:
+                ipc_handle = "BYPASS"
+            else:
+                ipc_handle = get_ipc_handle(param_tensor)
+            check_duplicate_handle(handle_to_name, ipc_handle, name)
+
+            weight_handles[name] = ipc_handle
+            tensor_info[name] = (
+                param_tensor.shape,
+                param_tensor.dtype,
+                param_tensor.device,
+            )
+
+        # Get Non-Parameter Buffers, eg. cos_sin_cache
+        source_buffers = dict(self.model.named_buffers())
+        for name, _ in self.model.named_buffers():
+            # Get the path to the parameter
+            path = name.split(".")
+
+            # Navigate to the parent module
+            module = self.model
+            for p in path[:-1]:
+                if p.isdigit():
+                    module = module[int(p)]
+                else:
+                    module = getattr(module, p)
+
+            # Create a parameter that shares storage with source parameter
+            source_buffer = source_buffers[name]
+            if source_buffer.numel() == 0:
+                tensor_info[name] = (None, None, None)
+                continue
+            buffer_tensor = source_buffer.view_as(source_buffer)
+
+            # Bypass empty parameter
+            if buffer_tensor.numel() == 0:
+                ipc_handle = "BYPASS"
+            else:
+                ipc_handle = get_ipc_handle(buffer_tensor)
+            check_duplicate_handle(handle_to_name, ipc_handle, name)
+
+            register_buffer_handles[name] = ipc_handle
+            tensor_info[name] = (
+                buffer_tensor.shape,
+                buffer_tensor.dtype,
+                buffer_tensor.device,
+            )
+
+        # Get KV Cache Handles
+        if isinstance(self.token_to_kv_pool, MHATokenToKVPool):
+            k_caches = self.token_to_kv_pool.k_buffer
+            v_caches = self.token_to_kv_pool.v_buffer
+            k_cache_handles = [get_ipc_handle(k_cache) for k_cache in k_caches]
+            v_cache_handles = [get_ipc_handle(v_cache) for v_cache in v_caches]
+
+            for i, (k_cache_handle, v_cache_handle) in enumerate(
+                zip(k_cache_handles, v_cache_handles)
+            ):
+                check_duplicate_handle(handle_to_name, k_cache_handle, f"k_cache_{i}")
+                check_duplicate_handle(handle_to_name, v_cache_handle, f"v_cache_{i}")
+
+            kvcache_info = {
+                "cache_shape": k_caches[0].shape,
+                "cache_dtype": k_caches[0].dtype,
+                "cache_device": k_caches[0].device,
+            }
+            kv_cache_handles = [k_cache_handles, v_cache_handles]
+        elif isinstance(self.token_to_kv_pool, MLATokenToKVPool):
+            kv_caches = self.token_to_kv_pool.kv_buffer
+            kv_cache_handles = [get_ipc_handle(kv_cache) for kv_cache in kv_caches]
+            for i, kv_cache_handle in enumerate(kv_cache_handles):
+                check_duplicate_handle(handle_to_name, kv_cache_handle, f"kv_cache_{i}")
+            kvcache_info = {
+                "cache_shape": kv_caches[0].shape,
+                "cache_dtype": kv_caches[0].dtype,
+                "cache_device": kv_caches[0].device,
+            }
+        else:
+            raise ValueError(
+                f"Unsupported token to kv pool type: {type(self.token_to_kv_pool)}"
+            )
+
+        # Get ReqToToken Handles
+        req_to_token_tensor = self.req_to_token_pool.req_to_token
+        req_to_token_handles = [get_ipc_handle(req_to_token_tensor)]
+        req_to_token_info = {
+            "req_to_token_shape": req_to_token_tensor.shape,
+            "req_to_token_dtype": req_to_token_tensor.dtype,
+            "req_to_token_device": req_to_token_tensor.device,
+        }
+
+        return IPCInfo(
+            params_info=tensor_info,
+            weight_handles=weight_handles,
+            register_buffer_handles=register_buffer_handles,
+            kv_cache_handles=kv_cache_handles,
+            kvcache_info=kvcache_info,
+            req_to_token_handle=req_to_token_handles,
+            req_to_token_info=req_to_token_info,
         )
+
+    def share_params_from_ipc(self, ipc_info: IPCInfo):
+        # Reconstruct parameters from IPC handles
+        for name, _ in self.model.named_parameters():
+            # Get the path to the parameter
+            path = name.split(".")
+
+            # Navigate to the parent module
+            module = self.model
+            for p in path[:-1]:
+                if p.isdigit():
+                    module = module[int(p)]
+                else:
+                    module = getattr(module, p)
+
+            # Get the parameter name (last part of the path)
+            param_name = path[-1]
+
+            share_param_handle = ipc_info.weight_handles.get(name, None)
+            shape, dtype, device = ipc_info.params_info[name]
+            size = reduce(lambda x, y: x * y, shape)
+
+            assert (
+                share_param_handle is not None
+            ), f"Parameter {name} not found in meta_info"
+
+            try:
+                if shape == torch.Size([0]):
+                    share_param_tensor = torch.empty(0, dtype=dtype, device=device)
+                else:
+                    share_param_tensor = convert_ipc_handle_to_tensor(
+                        share_param_handle, size, dtype, device
+                    ).view(shape)
+            except Exception as e:
+                raise NotImplementedError(f"Parameter {name, size, dtype, device} is not supported in Semi-PD")
+
+            new_param = nn.Parameter(share_param_tensor, requires_grad=False)
+            setattr(module, param_name, new_param)
+
+        # Reconstruct registered buffers from IPC handles
+        for name, _ in self.model.named_buffers():
+            # Get the path to the parameter
+            path = name.split(".")
+
+            # Navigate to the parent module
+            module = self.model
+            for p in path[:-1]:
+                if p.isdigit():
+                    module = module[int(p)]
+                else:
+                    module = getattr(module, p)
+
+            # Get the parameter name (last part of the path)
+            buffer_name = path[-1]
+
+            share_buffer_handle = ipc_info.register_buffer_handles.get(name, None)
+            shape, dtype, device = ipc_info.params_info[name]
+
+            if shape is None:
+                continue
+            assert (
+                share_buffer_handle is not None
+            ), f"Buffer {name} not found in meta_info"
+
+            # Shape can be [] when the buffer represents a scalar
+            size = reduce(lambda x, y: x * y, shape) if shape else 1
+            # For deepseek model
+            if "w_kc" in name or "w_vc" in name:
+                shape = [shape[0], shape[2], shape[1]]
+                share_buffer_tensor = (
+                    convert_ipc_handle_to_tensor(
+                        share_buffer_handle, size, dtype, device
+                    )
+                    .view(shape)
+                    .transpose(1, 2)
+                )
+            else:
+                share_buffer_tensor = convert_ipc_handle_to_tensor(
+                    share_buffer_handle, size, dtype, device
+                ).view(shape)
+            module.register_buffer(buffer_name, share_buffer_tensor, persistent=False)
+            # setattr(module, buffer_name, share_buffer_tensor)
+
+        # Reconstruct req_to_token from IPC handles
+        req_to_token_shape = ipc_info.req_to_token_info["req_to_token_shape"]
+        req_to_token_dtype = ipc_info.req_to_token_info["req_to_token_dtype"]
+        req_to_token_device = ipc_info.req_to_token_info["req_to_token_device"]
+        size = reduce(lambda x, y: x * y, req_to_token_shape)
+        self.req_to_token_pool.req_to_token = convert_ipc_handle_to_tensor(
+            ipc_info.req_to_token_handle[0],
+            size,
+            req_to_token_dtype,
+            req_to_token_device,
+        ).view(req_to_token_shape)
+
+        # Reconstruct kv cache from IPC handles
+        if isinstance(self.token_to_kv_pool, MHATokenToKVPool):
+            k_buffer = []
+            v_buffer = []
+            for k_cache_handle, v_cache_handle in zip(
+                ipc_info.kv_cache_handles[0], ipc_info.kv_cache_handles[1]
+            ):
+                cache_shape = ipc_info.kvcache_info["cache_shape"]
+                cache_dtype = ipc_info.kvcache_info["cache_dtype"]
+                cache_device = ipc_info.kvcache_info["cache_device"]
+                size = reduce(lambda x, y: x * y, cache_shape)
+                k_cache_tensor = convert_ipc_handle_to_tensor(
+                    k_cache_handle, size, cache_dtype, cache_device
+                ).view(cache_shape)
+                v_cache_tensor = convert_ipc_handle_to_tensor(
+                    v_cache_handle, size, cache_dtype, cache_device
+                ).view(cache_shape)
+                k_buffer.append(k_cache_tensor)
+                v_buffer.append(v_cache_tensor)
+            self.token_to_kv_pool.k_buffer = k_buffer
+            self.token_to_kv_pool.v_buffer = v_buffer
+        elif isinstance(self.token_to_kv_pool, MLATokenToKVPool):
+            kv_buffer = []
+            for kv_cache_handle in ipc_info.kv_cache_handles:
+                cache_shape = ipc_info.kvcache_info["cache_shape"]
+                cache_dtype = ipc_info.kvcache_info["cache_dtype"]
+                cache_device = ipc_info.kvcache_info["cache_device"]
+                size = reduce(lambda x, y: x * y, cache_shape)
+                kv_cache_tensor = convert_ipc_handle_to_tensor(
+                    kv_cache_handle, size, cache_dtype, cache_device
+                ).view(cache_shape)
+                kv_buffer.append(kv_cache_tensor)
+            self.token_to_kv_pool.kv_buffer = kv_buffer
+        else:
+            raise ValueError(
+                f"Unsupported token to kv pool type: {type(self.token_to_kv_pool)}"
+            )
+
+        # Reconstruct req_to_token from IPC handles
+        req_to_token_shape = ipc_info.req_to_token_info["req_to_token_shape"]
+        req_to_token_dtype = ipc_info.req_to_token_info["req_to_token_dtype"]
+        req_to_token_device = ipc_info.req_to_token_info["req_to_token_device"]
+        size = reduce(lambda x, y: x * y, req_to_token_shape)
+        req_to_token_tensor = convert_ipc_handle_to_tensor(
+            ipc_info.req_to_token_handle[0],
+            size,
+            req_to_token_dtype,
+            req_to_token_device,
+        ).view(req_to_token_shape)
+        self.req_to_token_pool.req_to_token = req_to_token_tensor
+
+    def load_model(self):
+        if not self.bypass_load_weight:
+            before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
+            logger.info(
+                f"Load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            )
+        else:
+            before_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
+            logger.info(
+                f"Bypass load weight begin. avail mem={get_available_gpu_memory(self.device, self.gpu_id):.2f} GB"
+            )
 
         # This can reduce thread conflicts and speed up weight loading.
         if self.device != "cpu":
@@ -732,10 +1040,16 @@ class ModelRunner:
         monkey_patch_isinstance_for_vllm_base_layer()
 
         with self.memory_saver_adapter.region(GPU_MEMORY_TYPE_WEIGHTS):
+            device_config = (
+                DeviceConfig(self.device)
+                if not self.bypass_load_weight
+                else DeviceConfig("meta")
+            )
             self.model = get_model(
                 model_config=self.model_config,
                 load_config=self.load_config,
-                device_config=DeviceConfig(self.device),
+                device_config=device_config,
+                bypass_load_weight=self.bypass_load_weight,
             )
         monkey_patch_vllm_parallel_state(reverse=True)
         monkey_patch_isinstance_for_vllm_base_layer(reverse=True)
@@ -777,15 +1091,27 @@ class ModelRunner:
 
         self.dtype = self.model_config.dtype
 
-        after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
-        self.weight_load_mem_usage = before_avail_memory - after_avail_memory
-        logger.info(
-            f"Load weight end. "
-            f"type={type(self.model).__name__}, "
-            f"dtype={self.dtype}, "
-            f"avail mem={after_avail_memory:.2f} GB, "
-            f"mem usage={self.weight_load_mem_usage:.2f} GB."
-        )
+        if not self.bypass_load_weight:
+            after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
+            self.weight_load_mem_usage = before_avail_memory - after_avail_memory
+            logger.info(
+                f"Load weight end. "
+                f"type={type(self.model).__name__}, "
+                f"dtype={self.dtype}, "
+                f"avail mem={after_avail_memory:.2f} GB, "
+                f"mem usage={self.weight_load_mem_usage:.2f} GB."
+            )
+        else:
+            after_avail_memory = get_available_gpu_memory(self.device, self.gpu_id)
+            self.weight_load_mem_usage = before_avail_memory - after_avail_memory
+            logger.info(
+                f"Bypass load weight. "
+                f"type={type(self.model).__name__}, "
+                f"dtype={self.dtype}, "
+                f"avail mem={after_avail_memory:.2f} GB, "
+                f"mem usage={self.weight_load_mem_usage:.2f} GB."
+            )
+
 
         # Handle the case where some ranks do not finish loading.
         try:
@@ -1245,9 +1571,15 @@ class ModelRunner:
                 f"Unsupported kv_cache_dtype: {self.server_args.kv_cache_dtype}."
             )
 
-        self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
-        if SGLANG_CI_SMALL_KV_SIZE:
-            self.max_total_num_tokens = int(SGLANG_CI_SMALL_KV_SIZE)
+        if self.instance_role == InstanceRole.OTHER or self.instance_role == InstanceRole.DECODE:
+            self.max_total_num_tokens = self.profile_max_num_token(total_gpu_memory)
+            if SGLANG_CI_SMALL_KV_SIZE:
+                self.max_total_num_tokens = int(SGLANG_CI_SMALL_KV_SIZE)
+        else:
+            assert (
+                max_total_tokens is not None
+            ), f"max_total_tokens is required for {self.instance_role} instance"
+            self.max_total_num_tokens = max_total_tokens
 
         if max_num_reqs is None:
             max_num_reqs = min(
@@ -1299,6 +1631,8 @@ class ModelRunner:
             // self.server_args.page_size
             * self.server_args.page_size
         )
+        logger.info(f" Using max_total_num_tokens={self.max_total_num_tokens}")
+
         # different pp rank may have different num of layers, so we need to reduce the max_total_num_tokens
         if self.pp_size > 1:
             tensor = torch.tensor(self.max_total_num_tokens, dtype=torch.int64)
@@ -1368,6 +1702,7 @@ class ModelRunner:
                     + extra_max_context_len,
                     device=self.device,
                     enable_memory_saver=self.server_args.enable_memory_saver,
+                    bypass_create_buffers=self.bypass_load_weight,
                 )
         else:
             # Draft worker shares req_to_token_pool with the target worker.
@@ -1413,8 +1748,12 @@ class ModelRunner:
                 enable_memory_saver=self.server_args.enable_memory_saver,
                 start_layer=self.start_layer,
                 end_layer=self.end_layer,
+                bypass_create_buffers=self.bypass_load_weight,
             )
         elif self.server_args.enable_double_sparsity:
+            assert (
+                not self.server_args.enable_semi_pd
+            ), "Double sparsity is not supported with semi-PD"
             self.token_to_kv_pool = DoubleSparseTokenToKVPool(
                 self.max_total_num_tokens,
                 page_size=self.page_size,
@@ -1474,6 +1813,7 @@ class ModelRunner:
                     enable_memory_saver=self.server_args.enable_memory_saver,
                     start_layer=self.start_layer,
                     end_layer=self.end_layer,
+                    bypass_create_buffers=self.bypass_load_weight,
                 )
 
         # Initialize token_to_kv_pool_allocator

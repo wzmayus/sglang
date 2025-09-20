@@ -113,47 +113,51 @@ class TokenizerCommunicatorMixin:
 
     def init_communicators(self: TokenizerManager, server_args: ServerArgs):
         # Communicators
+        fan_out = server_args.dp_size
+        if server_args.enable_semi_pd:
+            fan_out = 2 * server_args.dp_size  # P and D
+
         self.init_weights_update_group_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.update_weights_from_distributed_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.update_weights_from_tensor_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.get_weights_by_name_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.release_memory_occupation_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.resume_memory_occupation_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.slow_down_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.flush_cache_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.clear_hicache_storage_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.profile_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.get_internal_state_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.set_internal_state_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.expert_distribution_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
         self.update_lora_adapter_communicator = _Communicator(
-            self.send_to_scheduler, server_args.dp_size
+            self.send_to_scheduler, fan_out
         )
 
         self._result_dispatcher += self._get_communicator_dispatcher()
@@ -240,6 +244,11 @@ class TokenizerCommunicatorMixin:
         record_shapes: Optional[bool] = None,
         profile_by_stage: bool = False,
     ):
+        """
+        Semi-PD:
+        - aggregate the responses from P and D instances
+        - remove the return value since the caller ignores it
+        """
         self.auto_create_handle_loop()
         env_with_stack: bool = get_bool_env_var("SGLANG_PROFILE_WITH_STACK", "true")
         with_stack = False if with_stack is False or env_with_stack is False else True
@@ -262,10 +271,16 @@ class TokenizerCommunicatorMixin:
         return await self._execute_profile(req)
 
     async def _execute_profile(self: TokenizerManager, req: ProfileReq):
-        result = (await self.profile_communicator(req))[0]
-        if not result.success:
-            raise RuntimeError(result.message)
-        return result
+        # Semi-PD
+        results = await self.profile_communicator(req)
+        message = None
+        for result in results:
+            if not result.success:
+                message = result.message
+                break
+
+        if message is not None:
+            raise RuntimeError(message)
 
     async def start_expert_distribution_record(self: TokenizerManager):
         self.auto_create_handle_loop()

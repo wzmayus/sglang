@@ -22,6 +22,9 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
+import numpy as np
+from numpy import typing as npt
+
 from sglang.srt.lora.lora_registry import LoRARef
 from sglang.srt.managers.schedule_batch import BaseFinishReason
 from sglang.srt.multimodal.mm_utils import has_valid_data
@@ -604,6 +607,9 @@ class TokenizedGenerateReqInput:
 
     # Image gen grpc migration
     return_bytes: bool = False
+
+    # mark whether the current request is a resubmitted request after being withdrawn
+    is_retracted: bool = False
 
 
 @dataclass
@@ -1330,3 +1336,29 @@ class BlockReqType(Enum):
 @dataclass
 class BlockReqInput:
     type: BlockReqType
+
+
+@dataclass
+class GetNextPrefillBatchInput:
+    rids: List[str]
+
+
+@dataclass
+class GetNextPrefillBatchOutput:
+    rids: List[str]
+    chunked_rid: Optional[str]
+    req_pool_indices: List[int]
+    prefix_lens: List[int]
+    extend_input_lens: List[int]
+
+
+@dataclass
+class BatchRetractReqInput:
+    rids: List[str]
+
+
+@dataclass
+class BatchProcessPrefillResultReq:
+    next_token_ids: List[int]
+    next_token_logits: npt.NDArray[np.float32]
+

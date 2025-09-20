@@ -1136,12 +1136,19 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             len(self.out_cache_loc) == self.extend_num_tokens
         ), f"Expected {len(self.out_cache_loc)}, got {self.extend_num_tokens}"
 
-    def prepare_for_extend(self):
+    def prepare_for_extend(
+        self, pre_allocated_req_pool_indices: Optional[List[int]] = None
+    ):
         self.forward_mode = ForwardMode.EXTEND
 
         # Allocate req slots
         bs = len(self.reqs)
-        req_pool_indices = self.alloc_req_slots(bs, self.reqs)
+        # Allocate req slots
+        if pre_allocated_req_pool_indices is None:
+            req_pool_indices = self.alloc_req_slots(bs)
+        else:
+            assert bs == len(pre_allocated_req_pool_indices)
+            req_pool_indices = pre_allocated_req_pool_indices
 
         # Init tensors
         reqs = self.reqs
@@ -1189,7 +1196,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             req.req_pool_idx = req_pool_indices[i]
             assert seq_len - pre_len == req.extend_input_len
 
-            if pre_len > 0:
+            # pre_allocated_req_pool_indices being None indicates that we are on the decoding instance.
+            if pre_len > 0 and pre_allocated_req_pool_indices is None:
                 self.req_to_token_pool.write(
                     (req.req_pool_idx, slice(0, pre_len)), req.prefix_indices
                 )
@@ -1265,17 +1273,33 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
             extend_input_logprob_token_ids = None
 
         # Allocate memory
-        if self.token_to_kv_pool_allocator.page_size == 1:
-            out_cache_loc = self.alloc_token_slots(extend_num_tokens)
+        if pre_allocated_req_pool_indices is None:
+            if self.token_to_kv_pool_allocator.page_size == 1:
+                out_cache_loc = self.alloc_token_slots(extend_num_tokens)
+            else:
+                last_loc = get_last_loc(
+                    self.req_to_token_pool.req_to_token,
+                    req_pool_indices_tensor,
+                    prefix_lens_tensor,
+                )
+                out_cache_loc = self.alloc_paged_token_slots_extend(
+                    prefix_lens_tensor, seq_lens_tensor, last_loc, extend_num_tokens
+                )
         else:
-            last_loc = get_last_loc(
-                self.req_to_token_pool.req_to_token,
-                req_pool_indices_tensor,
-                prefix_lens_tensor,
-            )
-            out_cache_loc = self.alloc_paged_token_slots_extend(
-                prefix_lens_tensor, seq_lens_tensor, last_loc, extend_num_tokens
-            )
+            if self.token_to_kv_pool_allocator.page_size == 1:
+                out_cache_loc = []
+                for req, req_pool_idx in zip(self.reqs, req_pool_indices):
+                    pre_len, seq_len = len(req.prefix_indices), len(req.fill_ids)
+                    out_cache_loc.append(
+                        self.req_to_token_pool.req_to_token[
+                            req_pool_idx, pre_len:seq_len
+                        ]
+                    )
+                out_cache_loc = torch.cat(out_cache_loc).to(
+                    self.device, dtype=torch.int32, non_blocking=True
+                )
+            else:
+                raise NotImplementedError("Page size > 1 is not supported yet.")
 
         # Set fields
         self.input_ids = input_ids_tensor
@@ -1655,7 +1679,8 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         # Penalizer orchestrator must be merged before Batch.reqs is merged. This is because
         # orchestrator.merge() depends on Batch.reqs during preparation of each penalizers, so it
         # needs to be called with pre-merged Batch.reqs.
-        self.sampling_info.merge_batch(other.sampling_info)
+        if self.sampling_info is not None:
+            self.sampling_info.merge_batch(other.sampling_info)
 
         # Encoder-decoder infos
         if self.model_config.is_encoder_decoder:

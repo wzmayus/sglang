@@ -319,6 +319,9 @@ class ServerArgs:
     ds_heavy_channel_type: str = "qk"
     ds_sparse_decode_threshold: int = 4096
 
+    # SemiPD
+    enable_semi_pd: bool = False
+
     # Offloading
     cpu_offload_gb: int = 0
     offload_group_size: int = -1
@@ -404,6 +407,11 @@ class ServerArgs:
     enable_flashinfer_mxfp4_moe: bool = False
 
     def __post_init__(self):
+        """
+        Semi-PD:
+        - more memory for activation if semi-pd is enabled
+        - disable radix cache if semi-pd is enabled
+        """
         # Check deprecated arguments
         if self.enable_ep_moe:
             self.ep_size = self.tp_size
@@ -496,6 +504,12 @@ class ServerArgs:
                 self.mem_fraction_static = round((gpu_mem - reserved_mem) / gpu_mem, 3)
             else:
                 self.mem_fraction_static = 0.88
+
+            # Semi-PD: a little bit more static memory since the activation cost is doubled.
+            self.mem_fraction_static = self.mem_fraction_static * 0.9
+            logger.info(
+                f"Set mem_fraction_static to {self.mem_fraction_static} according to your configuration."
+            )
 
             # Lazy init to avoid circular import
             # Multimodal models need more memory for the image processor
@@ -642,6 +656,12 @@ class ServerArgs:
             logger.warning(
                 f"DP attention is enabled. The chunked prefill size is adjusted to {self.chunked_prefill_size} to avoid MoE kernel issues. "
             )
+            if self.enable_semi_pd and not self.disable_custom_all_reduce:
+                logger.warning(
+                    "Semi-PD is enabled. Disable custom all reduce to prevent hanging."
+                )
+                assert self.enable_dp_attention == False, "Semi-PD and DP attention cannot be enabled at the same time yet."
+                self.disable_custom_all_reduce = True
 
         if self.enable_dp_lm_head:
             assert (
@@ -852,6 +872,14 @@ class ServerArgs:
                 "The arguments enable-hierarchical-cache and disable-radix-cache are mutually exclusive "
                 "and cannot be used at the same time. Please use only one of them."
             )
+
+        # Semi-PD
+        if self.enable_semi_pd:
+            if not self.disable_radix_cache:
+                self.disable_radix_cache = True
+                logger.warning(
+                    "Semi-PD is enabled. Radix cache is disabled to avoid memory inconsistency between P and D instances."
+                )
 
     @staticmethod
     def add_cli_args(parser: argparse.ArgumentParser):
@@ -1840,6 +1868,13 @@ class ServerArgs:
             help="The type of heavy channels in double sparsity attention",
         )
 
+        # SemiPD
+        parser.add_argument(
+            "--enable-semi-pd",
+            action="store_true",
+            help="Enable SemiPD.",
+        )
+
         # Offloading
         parser.add_argument(
             "--cpu-offload-gb",
@@ -2649,6 +2684,97 @@ class PortArgs:
                 rpc_ipc_name=f"tcp://{dist_init_host}:{rpc_port}",
                 metrics_ipc_name=f"tcp://{dist_init_host}:{metrics_ipc_name}",
                 tokenizer_worker_ipc_name=None,
+            )
+
+
+@dataclasses.dataclass
+class SemiPDPortArgs:
+    tokenizer_ipc_name: str
+    # For standalone scheduler
+    s_scheduler_input_ipc_name: str
+    # For prefill scheduler
+    p_scheduler_input_ipc_name: str
+    # For decode scheduler
+    d_scheduler_input_ipc_name: str
+    detokenizer_ipc_name: str
+
+    # The ipc filename for rpc call between Engine and Scheduler
+    rpc_ipc_name: str
+
+    # The ipc filename for Scheduler to send metrics
+    metrics_ipc_name: str
+
+    bridge_ipc_name: str
+
+    s_nccl_port: int
+    p_nccl_port: int
+    d_nccl_port: int
+
+    def get_nccl_port(server_args: ServerArgs) -> int:
+        port = server_args.port + random.randint(100, 1000)
+        while True:
+            if is_port_available(port):
+                break
+            if port < 60000:
+                port += 42
+            else:
+                port -= 43
+        return port
+
+    @staticmethod
+    def init_new(server_args, dp_rank: Optional[int] = None) -> "SemiPDPortArgs":
+        s_port = SemiPDPortArgs.get_nccl_port(server_args)
+        p_port = SemiPDPortArgs.get_nccl_port(server_args)
+        d_port = SemiPDPortArgs.get_nccl_port(server_args)
+
+        if not server_args.enable_dp_attention:
+            return SemiPDPortArgs(
+                tokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                s_scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                p_scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                d_scheduler_input_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                detokenizer_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                bridge_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                rpc_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                metrics_ipc_name=f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}",
+                s_nccl_port=s_port,
+                p_nccl_port=p_port,
+                d_nccl_port=d_port,
+            )
+        else:
+            if server_args.nnodes > 1:
+                raise NotImplementedError("Multi-node SemiPD is not supported yet")
+
+            if server_args.dist_init_addr is None:
+                dist_init_addr = ("127.0.0.1", server_args.port + ZMQ_TCP_PORT_DELTA)
+            else:
+                dist_init_addr = server_args.dist_init_addr.split(":")
+            assert (
+                len(dist_init_addr) == 2
+            ), "please provide --dist-init-addr as host:port of head node"
+
+            dist_init_host, dist_init_port = dist_init_addr
+            port_base = int(dist_init_port) + 1
+            if dp_rank is None:
+                scheduler_input_port = (
+                    port_base + 2
+                )  # TokenizerManager to DataParallelController
+            else:
+                scheduler_input_port = port_base + 2 + 1 + dp_rank
+                scheduler_input_port = port_base + 2 + 1 + (dp_rank + 1) * 4
+
+            return SemiPDPortArgs(
+                tokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base}",
+                s_scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port}",
+                p_scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port + 1}",
+                d_scheduler_input_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port + 2}",
+                detokenizer_ipc_name=f"tcp://{dist_init_host}:{port_base + 1}",
+                bridge_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port + 3}",
+                rpc_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port+4}",
+                metrics_ipc_name=f"tcp://{dist_init_host}:{scheduler_input_port+5}",
+                s_nccl_port=s_port,
+                p_nccl_port=p_port,
+                d_nccl_port=d_port,
             )
 
 

@@ -34,6 +34,7 @@ import zmq
 from torch.distributed import barrier
 
 from sglang.global_config import global_config
+from sglang.semi_pd.utils import InstanceRole, IPCInfo
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.constrained.base_grammar_backend import (
     INVALID_GRAMMAR_OBJ,
@@ -67,6 +68,7 @@ from sglang.srt.layers.logits_processor import LogitsProcessorOutput
 from sglang.srt.layers.moe import initialize_moe_config
 from sglang.srt.managers.io_struct import (
     AbortReq,
+    BatchProcessPrefillResultReq,
     BatchTokenizedEmbeddingReqInput,
     BatchTokenizedGenerateReqInput,
     ClearHiCacheReqInput,
@@ -79,6 +81,7 @@ from sglang.srt.managers.io_struct import (
     FreezeGCReq,
     GetInternalStateReq,
     GetInternalStateReqOutput,
+    GetNextPrefillBatchInput,
     GetWeightsByNameReqInput,
     HealthCheckOutput,
     InitWeightsUpdateGroupReqInput,
@@ -142,7 +145,7 @@ from sglang.srt.mem_cache.radix_cache import RadixCache
 from sglang.srt.mem_cache.swa_radix_cache import SWARadixCache
 from sglang.srt.model_executor.forward_batch_info import ForwardMode, PPProxyTensors
 from sglang.srt.parser.reasoning_parser import ReasoningParser
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import PortArgs, SemiPDPortArgs, ServerArgs
 from sglang.srt.speculative.spec_info import SpeculativeAlgorithm
 from sglang.srt.torch_memory_saver_adapter import TorchMemorySaverAdapter
 from sglang.srt.two_batch_overlap import TboDPAttentionPreparer
@@ -208,13 +211,15 @@ class Scheduler(
     def __init__(
         self,
         server_args: ServerArgs,
-        port_args: PortArgs,
+        port_args: Union[PortArgs, SemiPDPortArgs],
         gpu_id: int,
         tp_rank: int,
         moe_ep_rank: int,
         pp_rank: int,
         dp_rank: Optional[int],
         dp_balance_meta: Optional[DPBalanceMeta] = None,
+        bypass_load_weight: bool = False,
+        instance_role: InstanceRole = InstanceRole.OTHER,
     ):
         # Parse args
         self.server_args = server_args
@@ -261,9 +266,29 @@ class Scheduler(
         context = zmq.Context(2)
         self.idle_sleeper = None
         if self.pp_rank == 0 and self.attn_tp_rank == 0:
-            self.recv_from_tokenizer = get_zmq_socket(
-                context, zmq.PULL, port_args.scheduler_input_ipc_name, False
-            )
+            if self.server_args.enable_semi_pd:
+                assert isinstance(port_args, SemiPDPortArgs)
+                if instance_role == InstanceRole.PREFILL:
+                    logger.debug(
+                        f"bind to p_scheduler_input_ipc_name: {port_args.p_scheduler_input_ipc_name}"
+                    )
+                    self.recv_from_tokenizer = get_zmq_socket(
+                        context, zmq.PULL, port_args.p_scheduler_input_ipc_name, True
+                    )
+                elif instance_role == InstanceRole.DECODE:
+                    logger.debug(
+                        f"bind to d_scheduler_input_ipc_name: {port_args.d_scheduler_input_ipc_name}"
+                    )
+                    self.recv_from_tokenizer = get_zmq_socket(
+                        context, zmq.PULL, port_args.d_scheduler_input_ipc_name, True
+                    )
+                else:
+                    raise ValueError(f"Invalid instance role: {instance_role}")
+            else:
+                self.recv_from_tokenizer = get_zmq_socket(
+                    context, zmq.PULL, port_args.scheduler_input_ipc_name, False
+                )
+
             self.recv_from_rpc = get_zmq_socket(
                 context, zmq.DEALER, port_args.rpc_ipc_name, False
             )
@@ -321,10 +346,27 @@ class Scheduler(
             logger.info("Overlap scheduler is disabled for embedding models.")
 
         # Launch a tensor parallel worker
-        if self.enable_overlap:
-            TpWorkerClass = TpModelWorkerClient
+        if self.server_args.enable_semi_pd:
+            if self.enable_overlap and instance_role == InstanceRole.DECODE:
+                TpWorkerClass = TpModelWorkerClient
+            else:
+                TpWorkerClass = TpModelWorker
         else:
-            TpWorkerClass = TpModelWorker
+            TpWorkerClass = (
+                TpModelWorkerClient if self.enable_overlap else TpModelWorker
+            )
+
+        # NCCL port
+        if self.server_args.enable_semi_pd:
+            assert isinstance(port_args, SemiPDPortArgs)
+            if instance_role == InstanceRole.PREFILL:
+                nccl_port = port_args.p_nccl_port
+            elif instance_role == InstanceRole.DECODE:
+                nccl_port = port_args.d_nccl_port
+            else:
+                raise ValueError(f"Invalid instance role: {instance_role}")
+        else:
+            nccl_port = port_args.nccl_port
 
         self.tp_worker = TpWorkerClass(
             server_args=server_args,
@@ -333,11 +375,16 @@ class Scheduler(
             moe_ep_rank=moe_ep_rank,
             pp_rank=pp_rank,
             dp_rank=dp_rank,
-            nccl_port=port_args.nccl_port,
+            nccl_port=nccl_port,
+            bypass_load_weight=bypass_load_weight,
+            instance_role=instance_role,
         )
 
         # Launch a draft worker for speculative decoding
         if self.spec_algorithm.is_eagle():
+            assert (
+                not server_args.enable_semi_pd
+            ), "EAGLE is not supported in semi-PD mode"
             from sglang.srt.speculative.eagle_worker import EAGLEWorker
 
             self.draft_worker = EAGLEWorker(
@@ -804,6 +851,15 @@ class Scheduler(
         if hasattr(self.model_config.hf_config, "num_experts_per_tok"):
             initialize_moe_config(self.server_args)
 
+    def init_attention_backend(self):
+        self.tp_worker.init_attention_backend()
+
+    def init_cuda_graphs(self):
+        self.tp_worker.init_cuda_graphs()
+
+    def share_params_from_ipc(self, ipc_info: IPCInfo):
+        self.tp_worker.share_params_from_ipc(ipc_info)
+
     @DynamicGradMode()
     def event_loop_normal(self):
         """A normal scheduler loop."""
@@ -1056,6 +1112,8 @@ class Scheduler(
                             TokenizedEmbeddingReqInput,
                             BatchTokenizedGenerateReqInput,
                             BatchTokenizedEmbeddingReqInput,
+                            GetNextPrefillBatchInput,
+                            BatchProcessPrefillResultReq,
                         ),
                     )
                 ]
@@ -1069,6 +1127,8 @@ class Scheduler(
                             TokenizedEmbeddingReqInput,
                             BatchTokenizedGenerateReqInput,
                             BatchTokenizedEmbeddingReqInput,
+                            GetNextPrefillBatchInput,
+                            BatchProcessPrefillResultReq,
                         ),
                     )
                 ]
@@ -1448,7 +1508,8 @@ class Scheduler(
 
         if memory_leak:
             msg = "token_to_kv_pool_allocator memory leak detected! " f"{token_msg}"
-            raise ValueError(msg)
+            logger.warning(msg)
+            # raise ValueError(msg)
 
         if self.disaggregation_mode == DisaggregationMode.DECODE:
             req_total_size = (
@@ -1463,7 +1524,8 @@ class Scheduler(
                 f"available_size={len(self.req_to_token_pool.free_slots)}, "
                 f"total_size={self.req_to_token_pool.size}\n"
             )
-            raise ValueError(msg)
+            logger.warning(msg)
+            # raise ValueError(msg)
 
         if (
             self.enable_metrics

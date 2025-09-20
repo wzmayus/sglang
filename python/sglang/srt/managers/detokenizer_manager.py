@@ -35,7 +35,7 @@ from sglang.srt.managers.io_struct import (
     MultiTokenizerRegisterReq,
 )
 from sglang.srt.managers.multi_tokenizer_mixin import MultiHttpWorkerDetokenizerMixin
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import PortArgs, SemiPDPortArgs, ServerArgs
 from sglang.srt.utils import (
     configure_logger,
     freeze_gc,
@@ -283,7 +283,7 @@ class LimitedCapacityDict(OrderedDict):
 
 def run_detokenizer_process(
     server_args: ServerArgs,
-    port_args: PortArgs,
+    port_args: Union[PortArgs, SemiPDPortArgs],
 ):
     kill_itself_when_parent_died()
     setproctitle.setproctitle("sglang::detokenizer")

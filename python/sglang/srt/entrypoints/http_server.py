@@ -47,8 +47,11 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import ORJSONResponse, Response, StreamingResponse
 
+from sglang.srt.entrypoints.engine import (
+    _launch_semi_pd_subprocesses,
+    _launch_subprocesses,
+)
 from sglang.srt.disaggregation.utils import FAKE_BOOTSTRAP_HOST, DisaggregationMode
-from sglang.srt.entrypoints.engine import _launch_subprocesses
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest,
     CompletionRequest,
@@ -1162,14 +1165,24 @@ def launch_server(
         port_args.tokenizer_worker_ipc_name = (
             f"ipc://{tempfile.NamedTemporaryFile(delete=False).name}"
         )
-        tokenizer_manager, template_manager, scheduler_info = _launch_subprocesses(
-            server_args=server_args, port_args=port_args
-        )
+        if server_args.enable_semi_pd:
+            tokenizer_manager, template_manager, scheduler_info = _launch_semi_pd_subprocesses(
+                server_args=server_args
+            )
+        else:
+            tokenizer_manager, template_manager, scheduler_info = _launch_subprocesses(
+                server_args=server_args, port_args=port_args
+            )
     else:
         setproctitle.setproctitle(f"sglang::http_server/tokenizer_manager")
-        tokenizer_manager, template_manager, scheduler_info = _launch_subprocesses(
-            server_args=server_args,
-        )
+        if server_args.enable_semi_pd:
+            tokenizer_manager, template_manager, scheduler_info = _launch_semi_pd_subprocesses(
+                server_args=server_args
+            )
+        else:
+            tokenizer_manager, template_manager, scheduler_info = _launch_subprocesses(
+                server_args=server_args
+            )
 
     set_global_state(
         _GlobalState(

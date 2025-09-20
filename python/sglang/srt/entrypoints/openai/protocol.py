@@ -32,6 +32,7 @@ from pydantic import (
     field_validator,
     model_serializer,
     model_validator,
+    root_validator,
 )
 from typing_extensions import Literal
 

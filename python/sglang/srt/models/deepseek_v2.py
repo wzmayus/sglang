@@ -941,9 +941,11 @@ class DeepseekV2AttentionMLA(nn.Module):
         self.alt_stream = alt_stream
         self.attn_mha.kv_b_proj = None
 
-        self.w_kc = None
-        self.w_vc = None
-        self.w_scale = 1.0
+        # Semi-PD, for sharing weights between prefill and decode instances.
+        w_kc, w_vc, w_scale = torch.Tensor([]), torch.Tensor([]), torch.Tensor([])
+        self.register_buffer("w_kc", w_kc, persistent=False)
+        self.register_buffer("w_vc", w_vc, persistent=False)
+        self.register_buffer("w_scale", w_scale, persistent=False)
 
         self.w_scale_k = None
         self.w_scale_v = None
@@ -2585,6 +2587,7 @@ class DeepseekV2ForCausalLM(nn.Module):
                 0, (-1, self_attn.qk_nope_head_dim + self_attn.v_head_dim)
             ).split([self_attn.qk_nope_head_dim, self_attn.v_head_dim], dim=1)
 
+
             if (
                 _use_aiter_gfx95
                 and self.quant_config is not None
@@ -2595,12 +2598,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                 )
 
             if not use_deep_gemm_bmm:
-                self_attn.w_kc = bind_or_assign(
-                    self_attn.w_kc, w_kc.transpose(1, 2).contiguous().transpose(1, 2)
-                )
-                self_attn.w_vc = bind_or_assign(
-                    self_attn.w_vc, w_vc.contiguous().transpose(1, 2)
-                )
+                w_kc = w_kc.transpose(1, 2).contiguous().transpose(1, 2)
+                w_vc = w_vc.contiguous().transpose(1, 2)
+                self_attn.register_buffer("w_kc", w_kc, persistent=False)
+                self_attn.register_buffer("w_vc", w_vc, persistent=False)
                 if (
                     hasattr(self_attn.kv_b_proj, "weight_scale")
                     and self_attn.w_scale is None
@@ -2610,6 +2611,10 @@ class DeepseekV2ForCausalLM(nn.Module):
                     )
                     if _is_hip:
                         self_attn.w_scale *= 2.0
+                    # Semi-PD
+                    self_attn.register_buffer(
+                        "w_scale", self_attn.w_scale, persistent=False
+                    )
                 # TODO: remove this after adding FP8 support in bmm cpu kernel
                 if _is_cpu and _is_cpu_amx_available and w.dtype == torch.float8_e4m3fn:
                     self_attn.w_kc = (

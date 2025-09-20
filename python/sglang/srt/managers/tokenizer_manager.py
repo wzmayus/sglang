@@ -40,6 +40,7 @@ import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
 
+from sglang.semi_pd.utils import AggregatedSocket
 from sglang.srt.aio_rwlock import RWLock
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import DisaggregationMode
@@ -80,7 +81,7 @@ from sglang.srt.managers.scheduler_input_blocker import input_blocker_guard_regi
 from sglang.srt.managers.tokenizer_communicator_mixin import TokenizerCommunicatorMixin
 from sglang.srt.metrics.collector import TokenizerMetricsCollector
 from sglang.srt.sampling.sampling_params import SamplingParams
-from sglang.srt.server_args import PortArgs, ServerArgs
+from sglang.srt.server_args import PortArgs, SemiPDPortArgs, ServerArgs
 from sglang.srt.utils import (
     configure_gc_warning,
     dataclass_to_string_truncated,
@@ -140,13 +141,14 @@ class TokenizerManager(TokenizerCommunicatorMixin):
     def __init__(
         self,
         server_args: ServerArgs,
-        port_args: PortArgs,
+        port_args: Union[PortArgs, SemiPDPortArgs],
     ):
         # Parse args
         self.server_args = server_args
         self.enable_metrics = server_args.enable_metrics
         self.log_requests = server_args.log_requests
         self.log_requests_level = server_args.log_requests_level
+
         self.preferred_sampling_params = (
             json.loads(server_args.preferred_sampling_params)
             if server_args.preferred_sampling_params
@@ -223,14 +225,31 @@ class TokenizerManager(TokenizerCommunicatorMixin):
             context, zmq.PULL, port_args.tokenizer_ipc_name, True
         )
         if self.server_args.tokenizer_worker_num > 1:
+            assert (
+                not server_args.enable_semi_pd
+            ), "Multi tokenizer is not supported in semi-PD mode for now"
             # Use tokenizer_worker_ipc_name in multi-tokenizer mode
             self.send_to_scheduler = get_zmq_socket(
                 context, zmq.PUSH, port_args.tokenizer_worker_ipc_name, False
             )
         else:
-            self.send_to_scheduler = get_zmq_socket(
-                context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
-            )
+            if server_args.enable_semi_pd and server_args.dp_size == 1:
+                assert isinstance(port_args, SemiPDPortArgs)
+                self.send_to_p_scheduler = get_zmq_socket(
+                    context, zmq.PUSH, port_args.p_scheduler_input_ipc_name, False
+                )
+                self.send_to_d_scheduler = get_zmq_socket(
+                    context, zmq.PUSH, port_args.d_scheduler_input_ipc_name, False
+                )
+                # Decode first, for better performance.
+                self.send_to_scheduler = AggregatedSocket(
+                    [self.send_to_d_scheduler, self.send_to_p_scheduler]
+                )
+            else:
+                assert isinstance(port_args, PortArgs)
+                self.send_to_scheduler = get_zmq_socket(
+                    context, zmq.PUSH, port_args.scheduler_input_ipc_name, True
+                )
 
         # Request states
         self.no_create_loop = False
