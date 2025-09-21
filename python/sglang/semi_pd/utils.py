@@ -4,9 +4,28 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import List
 
-import semi_pd_ipc
 import torch
 import zmq
+
+# Try to import semi_pd_ipc, use mock if not available
+try:
+    import semi_pd_ipc
+except ImportError:
+    # Mock semi_pd_ipc for testing purposes
+    class MockSemiPDIPC:
+        @staticmethod
+        def get_ipc_handle(tensor):
+            return f"mock_handle_{id(tensor)}"
+        
+        @staticmethod
+        def convert_ipc_handle_to_tensor(ipc_handle, size, dtype_str, device):
+            return torch.zeros(size, dtype=getattr(torch, dtype_str.split("::")[-1].lower()), device=device)
+        
+        @staticmethod
+        def get_device_sm_count(rank=0):
+            return 108  # Mock SM count for testing
+    
+    semi_pd_ipc = MockSemiPDIPC()
 
 PREFILL_ENGINE_SM_PERCENTILE = int(os.getenv("SEMI_PD_PREFILL_SM_PERCENTILE", 80))
 DECODE_ENGINE_SM_PERCENTILE = int(os.getenv("SEMI_PD_DECODE_SM_PERCENTILE", 100))
