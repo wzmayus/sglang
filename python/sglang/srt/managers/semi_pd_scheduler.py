@@ -11,6 +11,10 @@ import psutil
 import setproctitle
 
 from sglang.semi_pd.utils import InstanceRole
+from sglang.semi_pd.resident_process_manager import ResidentProcessManager
+from sglang.semi_pd.unified_memory_manager import UnifiedMemoryManager
+from sglang.semi_pd.metrics_integration import integrate_semi_pd_metrics_with_scheduler
+from sglang.semi_pd.slo_algorithm import SLOConstraints, SLOAwareResourceController
 from sglang.srt.managers.io_struct import TokenizedGenerateReqInput
 from sglang.srt.managers.schedule_batch import FINISH_ABORT, MultimodalInputs, Req
 from sglang.srt.managers.scheduler import Scheduler
@@ -53,6 +57,51 @@ class SemiPDScheduler(Scheduler):
             bypass_load_weight=bypass_load_weight,
             instance_role=instance_role,
         )
+        
+        # 集成Semi-PD新功能
+        self._init_semi_pd_features()
+        
+    def _init_semi_pd_features(self):
+        """初始化Semi-PD的新功能"""
+        try:
+            # 1. 集成Unified Memory Manager
+            if hasattr(self.server_args, 'enable_unified_memory') and self.server_args.enable_unified_memory:
+                self.unified_memory_manager = UnifiedMemoryManager(
+                    total_blocks=getattr(self.server_args, 'unified_memory_blocks', 1000),
+                    block_size=getattr(self.server_args, 'unified_memory_block_size', 4096),
+                    page_size=getattr(self.server_args, 'unified_memory_page_size', 16),
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+                logger.info("Unified Memory Manager initialized")
+            else:
+                self.unified_memory_manager = None
+                
+            # 2. 集成Metrics收集
+            integrate_semi_pd_metrics_with_scheduler(self, self.instance_role)
+            
+            # 3. 初始化SLO-aware算法（如果启用）
+            if hasattr(self.server_args, 'enable_slo_aware') and self.server_args.enable_slo_aware:
+                slo_constraints = SLOConstraints(
+                    ttft_target_ms=getattr(self.server_args, 'slo_ttft_target', 100.0),
+                    tpot_target_ms=getattr(self.server_args, 'slo_tpot_target', 50.0),
+                )
+                
+                # 注意：SLO控制器需要在进程轮换管理器初始化后再创建
+                self.slo_constraints = slo_constraints
+                self.slo_controller = None
+            else:
+                self.slo_constraints = None
+                self.slo_controller = None
+                
+            logger.info(f"Semi-PD features initialized for {self.instance_role.name}")
+            
+        except Exception as e:
+            logger.error(f"Failed to initialize Semi-PD features: {e}")
+            # 不影响基本功能，继续运行
+            self.unified_memory_manager = None
+            self.slo_constraints = None
+            self.slo_controller = None
 
     def add_to_waiting_queue(self, req: Req):
         req.queue_time_start = time.perf_counter()
@@ -69,8 +118,22 @@ class SemiPDScheduler(Scheduler):
         SemiPD changes:
           - disable grammar
           - handle retracted requests
+          - integrate Semi-PD metrics collection
         """
         logger.info(f"New request {recv_req.rid}, #tokens: {len(recv_req.input_ids)}")
+
+        # Semi-PD: 记录请求到达
+        if hasattr(self, 'semi_pd_on_request_arrival'):
+            try:
+                # 创建临时请求对象用于metrics收集
+                temp_req = Req(
+                    rid=recv_req.rid,
+                    origin_input_ids=recv_req.input_ids,
+                    sampling_params=recv_req.sampling_params,
+                )
+                self.semi_pd_on_request_arrival(temp_req)
+            except Exception as e:
+                logger.warning(f"Failed to record request arrival for metrics: {e}")
 
         # Create a new request
         if (

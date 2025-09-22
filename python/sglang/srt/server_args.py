@@ -319,8 +319,26 @@ class ServerArgs:
     ds_heavy_channel_type: str = "qk"
     ds_sparse_decode_threshold: int = 4096
 
-    # SemiPD
-    enable_semi_pd: bool = False
+    # Semi-PD新功能配置
+    enable_semi_pd: bool = False  # 保持向后兼容
+    enable_semi_pd_coordinator: bool = False
+    enable_unified_memory: bool = False
+    enable_slo_aware: bool = False
+    
+    # Unified Memory Manager配置
+    unified_memory_blocks: int = 1000
+    unified_memory_block_size: int = 4096
+    unified_memory_page_size: int = 16
+    
+    # SLO配置
+    slo_ttft_target: float = 100.0  # TTFT目标延迟（毫秒）
+    slo_tpot_target: float = 50.0   # TPOT目标延迟（毫秒）
+    slo_window_size: float = 30.0   # SLO监控窗口大小（秒）
+    slo_monitoring_interval: float = 10.0  # SLO监控间隔（秒）
+    
+    # 初始SM分配
+    initial_prefill_sm: int = 70
+    initial_decode_sm: int = 30
 
     # Offloading
     cpu_offload_gb: int = 0
@@ -1868,11 +1886,86 @@ class ServerArgs:
             help="The type of heavy channels in double sparsity attention",
         )
 
-        # SemiPD
+        # Semi-PD
         parser.add_argument(
             "--enable-semi-pd",
             action="store_true",
-            help="Enable SemiPD.",
+            help="Enable Semi-PD (backward compatibility).",
+        )
+        parser.add_argument(
+            "--enable-semi-pd-coordinator",
+            action="store_true",
+            help="Enable Semi-PD coordinator with all features.",
+        )
+        parser.add_argument(
+            "--enable-unified-memory",
+            action="store_true",
+            help="Enable unified memory manager.",
+        )
+        parser.add_argument(
+            "--enable-slo-aware",
+            action="store_true",
+            help="Enable SLO-aware dynamic resource adjustment.",
+        )
+        
+        # Unified Memory Manager
+        parser.add_argument(
+            "--unified-memory-blocks",
+            type=int,
+            default=ServerArgs.unified_memory_blocks,
+            help="Total blocks for unified memory manager.",
+        )
+        parser.add_argument(
+            "--unified-memory-block-size",
+            type=int,
+            default=ServerArgs.unified_memory_block_size,
+            help="Block size for unified memory manager (bytes).",
+        )
+        parser.add_argument(
+            "--unified-memory-page-size",
+            type=int,
+            default=ServerArgs.unified_memory_page_size,
+            help="Page size for unified memory manager.",
+        )
+        
+        # SLO Configuration
+        parser.add_argument(
+            "--slo-ttft-target",
+            type=float,
+            default=ServerArgs.slo_ttft_target,
+            help="TTFT target latency (ms).",
+        )
+        parser.add_argument(
+            "--slo-tpot-target",
+            type=float,
+            default=ServerArgs.slo_tpot_target,
+            help="TPOT target latency (ms).",
+        )
+        parser.add_argument(
+            "--slo-window-size",
+            type=float,
+            default=ServerArgs.slo_window_size,
+            help="SLO monitoring window size (seconds).",
+        )
+        parser.add_argument(
+            "--slo-monitoring-interval",
+            type=float,
+            default=ServerArgs.slo_monitoring_interval,
+            help="SLO monitoring interval (seconds).",
+        )
+        
+        # SM Allocation
+        parser.add_argument(
+            "--initial-prefill-sm",
+            type=int,
+            default=ServerArgs.initial_prefill_sm,
+            help="Initial prefill SM percentage.",
+        )
+        parser.add_argument(
+            "--initial-decode-sm",
+            type=int,
+            default=ServerArgs.initial_decode_sm,
+            help="Initial decode SM percentage.",
         )
 
         # Offloading

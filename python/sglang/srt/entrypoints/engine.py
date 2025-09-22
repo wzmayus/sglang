@@ -886,6 +886,7 @@ def _launch_semi_pd_subprocesses(
     server_args: ServerArgs,
 ) -> Tuple[TokenizerManager, TemplateManager, Dict]:
     from sglang.srt.managers.semi_pd_scheduler import run_scheduler_process
+    from sglang.semi_pd.semi_pd_coordinator import create_semi_pd_coordinator
 
     # Configure global environment
     configure_logger(server_args)
@@ -898,6 +899,30 @@ def _launch_semi_pd_subprocesses(
     server_args.model_path, server_args.tokenizer_path = prepare_model_and_tokenizer(
         server_args.model_path, server_args.tokenizer_path
     )
+
+    # 初始化Semi-PD协调器（如果启用了新功能）
+    semi_pd_coordinator = None
+    if getattr(server_args, 'enable_semi_pd_coordinator', False):
+        try:
+            # 创建端口参数
+            port_args = SemiPDPortArgs.init_new(server_args)
+            
+            # 创建协调器
+            semi_pd_coordinator = create_semi_pd_coordinator(
+                server_args=server_args,
+                port_args=port_args,
+            )
+            
+            # 启动协调器
+            if semi_pd_coordinator.start():
+                logger.info("Semi-PD Coordinator started successfully")
+            else:
+                logger.error("Failed to start Semi-PD Coordinator")
+                semi_pd_coordinator = None
+                
+        except Exception as e:
+            logger.error(f"Failed to initialize Semi-PD Coordinator: {e}")
+            semi_pd_coordinator = None
 
     scheduler_procs = []
     scheduler_infos = []
