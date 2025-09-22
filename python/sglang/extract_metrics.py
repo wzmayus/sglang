@@ -16,18 +16,17 @@ field_mapping = {
     "Mean E2E Latency (ms)": "mean_e2e_latency_ms",
     "实时并发量": "concurrency",
     "Mean TTFT (ms)": "mean_ttft_ms",
-    "P90 TTFT (ms)": None,  # JSON中没有直接对应
-    "P95 TTFT (ms)": None,  # JSON中没有直接对应
+    "P90 TTFT (ms)": "p90_ttft_ms",
+    "P95 TTFT (ms)": "p95_ttft_ms",
     "P99 TTFT (ms)": "p99_ttft_ms",
     "Mean TPOT (ms)": "mean_tpot_ms",
-    "P90 TPOT (ms)": None,  # JSON中没有直接对应
-    "P95 TPOT (ms)": None,  # JSON中没有直接对应
+    "P90 TPOT (ms)": "p90_tpot_ms",
+    "P95 TPOT (ms)": "p95_tpot_ms",
     "P99 TPOT (ms)": "p99_tpot_ms",
     "Mean ITL (ms)": "mean_itl_ms",
-    "P90 ITL (ms)": None,  # JSON中没有直接对应
+    "P90 ITL (ms)": "p90_itl_ms",
     "P95 ITL (ms)": "p95_itl_ms",
     "P99 ITL (ms)": "p99_itl_ms",
-    "P99.8 ITL (ms)": None  # JSON中没有直接对应
 }
 
 # 表头

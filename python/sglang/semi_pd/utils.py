@@ -1,4 +1,3 @@
-* Python script, ASCII text executable, with CRLF line terminators
 import os
 from dataclasses import dataclass
 from enum import Enum
@@ -16,15 +15,15 @@ except ImportError:
         @staticmethod
         def get_ipc_handle(tensor):
             return f"mock_handle_{id(tensor)}"
-        
+
         @staticmethod
         def convert_ipc_handle_to_tensor(ipc_handle, size, dtype_str, device):
             return torch.zeros(size, dtype=getattr(torch, dtype_str.split("::")[-1].lower()), device=device)
-        
+
         @staticmethod
         def get_device_sm_count(rank=0):
             return 108  # Mock SM count for testing
-    
+
     semi_pd_ipc = MockSemiPDIPC()
 
 PREFILL_ENGINE_SM_PERCENTILE = int(os.getenv("SEMI_PD_PREFILL_SM_PERCENTILE", 80))
